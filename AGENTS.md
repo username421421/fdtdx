@@ -52,24 +52,42 @@ Files:
 * `src/fdtdx/adjoint/scene.py` — `derive_adjoint_objects`
 * `src/fdtdx/adjoint/vjp.py` — the `jax.custom_vjp`
 * `src/fdtdx/adjoint/api.py` — `reciprocity_param_fn`, `reciprocity_phasor_fn`
-* `tests/simulation/adjoint/` — 23 tests, all passing; unit suite unchanged at 2578
+* `tests/simulation/adjoint/` — 32 tests, all passing; unit suite unchanged at 2578
 
-**Supported:** any differentiable FoM over a plain `PhasorDetector`; lossy design
-regions (tested to sigma = 3e5 S/m); `Device` parameters with `param_transforms`;
+**Supported:** any differentiable FoM over a plain `PhasorDetector`; **near-to-far
+box projection** via `FieldProjectionAngleDetector`, at 6.4e-07 against
+`run_fdtd` and still only two forward solves for a five-face box; objectives on
+**E, H or both**; several objective monitors at once; lossy design regions
+(tested to sigma = 3e5 S/m); `Device` parameters with `param_transforms`;
 float32 and float64; CPU and GPU.
 
-**Not supported:** near-to-far and other box-mode detectors, design-dependent
-loss (Meep's `MaterialGrid(damping=)`), dispersive design regions,
-`dft_subsample > 1`, `reduce_volume`, `exact_interpolation`. All raise rather
+**Near-to-far needs one line.** `FieldProjectionAngleDetector` fixes
+`exact_interpolation=True`, which runs outside the detector's own `update` and so
+is invisible to a VJP that replaces the time loop. Turn it off before placing:
+
+```python
+detector = detector.aset("exact_interpolation", False)
+```
+
+The detector then records raw Yee fields; that shifts the forward far field by a
+second-order amount that converges away (1.53e-02 at 12 cells per wavelength,
+3.39e-03 at 24) and leaves the gradient unaffected. Leaving it on raises.
+
+**Not supported:** design-dependent loss (Meep's `MaterialGrid(damping=)`),
+dispersive design regions, `dft_subsample > 1`, `reduce_volume`, the co-location
+transpose, and mode-overlap or diffraction-order detectors. All raise rather
 than approximating.
 
 **Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
 about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is
 not fixed by running longer.
 
-Read `notes/adjoint/03-production.md` before changing any of it: it records four
-corrections to earlier conclusions, including one (two `place_objects` calls
-re-randomizing `Device` parameters) that was a silent correctness bug.
+Read `notes/adjoint/03-production.md` and `04-near-to-far.md` before changing any
+of it. Between them they record five corrections to earlier conclusions,
+including two that were silent correctness bugs: two `place_objects` calls
+re-randomizing `Device` parameters, and a magnetic objective whose gradient came
+out anti-correlated at cosine -0.998, which an optimizer would have followed
+uphill without complaint.
 
 ## Environment
 
