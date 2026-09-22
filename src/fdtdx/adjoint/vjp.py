@@ -208,6 +208,9 @@ def make_reciprocity_phasor_fn(
             f"detector's {tuple(obj_det.components)}"
         )
 
+    dt = float(config.time_step_duration)
+    courant = float(config.courant_number)
+    T = int(config.time_steps_total)
     omegas = tuple(float(w) for w in obj_det._angular_frequencies)
     # Compared with a tolerance rather than exactly: on a float32 run the
     # detector stores its frequencies in float32, so a value round-tripped
@@ -229,10 +232,6 @@ def make_reciprocity_phasor_fn(
     _reject_frozen_sources_in_design(forward_objects, design_slice_tuple)
     _reject_frozen_sources_in_design(adjoint_objects, design_slice_tuple, skip=(adjoint_source,))
 
-    dt = float(config.time_step_duration)
-    courant = float(config.courant_number)
-    T = int(config.time_steps_total)
-
     win = gaussian_window(T) if window is None else window
     # Precompute the amplitude-solve matrix on concrete values so the solve
     # itself is a plain jnp.linalg.solve and works under trace inside the VJP.
@@ -246,6 +245,28 @@ def make_reciprocity_phasor_fn(
         )
     A = jnp.asarray(A_np)
     nf = len(omegas)
+
+    # Magnetic components carry an extra factor, for two independent reasons.
+    #
+    # Sign: Lorentz reciprocity is not symmetric between the electric and magnetic
+    # pairings, int(E_a . J_b - H_a . M_b) = int(E_b . J_a - H_b . M_a), so a
+    # cotangent on a magnetic component maps to an adjoint magnetic current of the
+    # opposite sign. Without the flip the gradient points backwards: cosine -0.998
+    # against checkpointed autodiff on an Hx objective.
+    #
+    # Half-step: with exact_interpolation=False the detector stores the
+    # post-update H, which lives at n+1/2, but weights it with the integer-step
+    # kernel exp(+i w n dt) (phasor.py uses time_passed = time_step * dt), while
+    # the adjoint magnetic current is injected at time_step + 0.5
+    # (fdtd/update.py:813). Compensating that costs exp(-i w dt / 2).
+    #
+    # Measured on an Hx objective: plain sign flip 1.04e-01, with exp(+i w dt/2)
+    # 2.26e-01, with exp(-i w dt/2) 6.3e-07 at cosine 1.000000000.
+    magnetic_factor = -np.exp(-1j * np.asarray(omegas, dtype=np.float64) * dt / 2.0)
+    is_magnetic = np.asarray([c.startswith("H") for c in obj_det.components])
+    _sign = np.where(is_magnetic[None, :], magnetic_factor[:, None], 1.0 + 0.0j)
+    component_sign = jnp.asarray(_sign).reshape(_sign.shape + (1,) * len(des_det.grid_shape))
+
     des_slice = des_det.grid_slice
 
     # ObjectContainer.sources is a filtered view of object_list, so the source has
@@ -255,6 +276,7 @@ def make_reciprocity_phasor_fn(
 
     def _solve_amplitudes(target: jax.Array) -> jax.Array:
         """Trace-safe version of solve_adjoint_amplitudes with A precomputed."""
+        target = target * component_sign
         tail = target.shape[1:]
         flat = target.reshape(nf, -1)
         rhs = jnp.concatenate([jnp.real(flat), jnp.imag(flat)], axis=0)

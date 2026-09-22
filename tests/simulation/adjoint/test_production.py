@@ -65,7 +65,7 @@ def _narrowband_dipole(name, cell):
     return src, src.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=cell)
 
 
-def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC):
+def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC, components=("Ez",)):
     config = SimulationConfig(
         time=sim_fs * 1e-15,
         grid=UniformGrid(spacing=_RES),
@@ -333,3 +333,71 @@ class TestMaterialAndGeometryCoverage:
         from fdtdx.adjoint.vjp import _reject_frozen_sources_in_design
 
         _reject_frozen_sources_in_design(swapped, des_slice)
+
+
+class TestMagneticComponents:
+    """Objectives on H, needed before box-mode near-to-far can work.
+
+    Box-mode field projection concatenates E and H, so its adjoint source drives
+    all six components. Magnetic components carry an extra factor
+    ``-exp(-i w dt / 2)``: the minus from Lorentz reciprocity's asymmetry between
+    the electric and magnetic pairings, and the half-step because the detector
+    stores the post-update H (living at n+1/2) but weights it with the
+    integer-step kernel. Measured on an Hx objective: no factor 1.91 at cosine
+    -0.998, sign flip alone 1.04e-01, both 6.3e-07 at cosine 1.000000000.
+    """
+
+    @pytest.mark.parametrize(
+        "components",
+        [
+            ("Ez",),
+            ("Hx",),
+            ("Hy",),
+            ("Ez", "Hx"),
+            ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
+        ],
+        ids=["Ez", "Hx", "Hy", "Ez_Hx", "all_six"],
+    )
+    def test_matches_checkpointed_for_any_component_set(self, components):
+        objects, arrays, _, config, _ = _scene(components=components)
+        window = gaussian_window(int(config.time_steps_total))
+        cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+        def official(ie):
+            arrs = arrays.aset("inv_permittivities", ie)
+            _, out = fdtdx.run_fdtd(arrs, objects, cfg_ck, _KEY, show_progress=False)
+            return _FOM(out.detector_states["mon"]["phasor"])
+
+        fn = reciprocity_phasor_fn(
+            arrays,
+            objects,
+            config,
+            _KEY,
+            objective_detector="mon",
+            design_detector="des",
+            window=window,
+        )
+        ie = arrays.inv_permittivities
+        g_off = jax.grad(official)(ie)
+        g_rec = jax.grad(lambda x: _FOM(fn(x)))(ie)
+        gs = next(d for d in objects.detectors if d.name == "des").grid_slice
+        a, b = g_rec[:, *gs], g_off[:, *gs]
+        rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+        cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
+        assert rel < 1e-4, f"{components}: rel={rel:.3e}"
+        assert cos > 1 - 1e-8, f"{components}: cosine {cos:.10f}"
+
+    def test_magnetic_sign_flip_is_actually_needed(self):
+        """Guard against someone 'simplifying' the magnetic factor away.
+
+        Without the flip the Hx gradient anti-correlates with the truth, so the
+        optimizer would walk uphill.
+        """
+        from fdtdx.adjoint import vjp as _vjp
+
+        omegas = _OMEGAS
+        dt = 1e-16
+        factor = -np.exp(-1j * np.asarray(omegas) * dt / 2.0)
+        assert np.all(factor.real < 0), "the magnetic factor must carry the reciprocity sign"
+        assert not np.allclose(factor, -1.0), "the half-step phase must not be dropped"
+        assert hasattr(_vjp, "make_reciprocity_phasor_fn")

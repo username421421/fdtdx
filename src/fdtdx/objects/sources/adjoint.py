@@ -101,8 +101,14 @@ class AdjointCurrentSource(Source):
         t = time_step * dt
         phase = jnp.exp(1j * omega * t)
         acc = jnp.tensordot(phase, self.amplitudes, axes=((0,), (0,)))
-        w = self.window[jnp.clip(time_step, 0, self.window.shape[0] - 1)]
-        return jnp.real(acc) * w
+        # update_H is called with ``time_step + 0.5`` (fdtd/update.py:813), the Yee
+        # half-step, so ``time_step`` is not always an integer. The carrier phase
+        # above uses that exact half-integer time, which is what makes the magnetic
+        # injection land on the right half-step; only the envelope lookup needs an
+        # integer, and the envelope varies slowly enough that flooring it is
+        # negligible against the carrier.
+        index = jnp.clip(jnp.floor(time_step).astype(jnp.int32), 0, self.window.shape[0] - 1)
+        return jnp.real(acc) * self.window[index]
 
     def _inject(
         self,
@@ -127,7 +133,7 @@ class AdjointCurrentSource(Source):
             inv_local = inv_material
 
         for k, axis in active:
-            if isinstance(inv_local, jax.Array):
+            if isinstance(inv_local, jax.Array) and inv_local.ndim > 0:
                 # inv_permittivities is (1, ...) when isotropic and (3, ...) when
                 # diagonally anisotropic; index the component only when present.
                 factor = inv_local[axis] if inv_local.shape[0] > 1 else inv_local[0]
