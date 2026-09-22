@@ -121,20 +121,27 @@ def _find(container, name: str, kind: str):
 
 
 def _validate_objective_detector(det, role: str) -> None:
-    """Accept a plain phasor detector or a box-mode field projection detector."""
-    if is_box_projection(det):
-        if len(det.components) != 6:
-            raise NotImplementedError(
-                f"The {role} detector records {len(det.components)} components; box-mode field "
-                "projection concatenates E and H and so needs all six "
-                "(Ex, Ey, Ez, Hx, Hy, Hz)."
-            )
-    elif type(det) is not PhasorDetector:
+    """Accept any phasor detector whose state layout we can place adjoint currents for.
+
+    The transpose only needs two things: complex phasors accumulated linearly
+    from the fields, and a known mapping from each state key to the cells it
+    reads. :func:`~fdtdx.adjoint.scene.detector_channels` decides the second and
+    raises if it cannot. Anything a detector computes *on top* of its phasors is
+    pure JAX above the VJP boundary and differentiates itself, which is why
+    ``PhasorPoyntingFluxDetector.compute_poynting_flux``,
+    ``ClosedSurfacePhasorPoyntingFluxDetector.compute_net_flux`` and
+    ``FieldProjectionAngleDetector.project`` all work without special cases.
+    """
+    if not isinstance(det, PhasorDetector):
         raise NotImplementedError(
-            f"The {role} detector must be a PhasorDetector or a box-mode field projection "
-            f"detector, got {type(det).__name__}. Other post-processing subclasses (mode "
-            "overlap, diffraction orders) keep state this transpose does not cover; record raw "
-            "phasors and do the post-processing in JAX on top of this function instead."
+            f"The {role} detector is a {type(det).__name__}, which does not accumulate complex "
+            "phasors, so there is no linear transpose to take. Record phasors with a "
+            "PhasorDetector and compute the quantity you want in JAX on top."
+        )
+    if is_box_projection(det) and len(det.components) != 6:
+        raise NotImplementedError(
+            f"The {role} detector records {len(det.components)} components; box-mode field "
+            "projection concatenates E and H and so needs all six (Ex, Ey, Ez, Hx, Hy, Hz)."
         )
     if det._dft_stride != 1:
         raise NotImplementedError(
@@ -270,7 +277,9 @@ def make_reciprocity_phasor_fn(
                 )
             idx = next(i for i, o in enumerate(adjoint_objects.object_list) if getattr(o, "name", None) == src_name)
             channels.append((d_i, state_key, idx))
-        returns_dict.append(is_box_projection(det))
+        # more than one state key means the caller receives the whole dict and
+        # applies the detector's own readout to it
+        returns_dict.append(len(chans) > 1)
 
     # A stock source overlapping the design region would make this kernel disagree
     # with run_fdtd; refuse rather than silently pick a convention.

@@ -543,3 +543,191 @@ class TestNearToFar:
                 design_detector="des",
                 window=window,
             )
+
+
+class TestFluxAndEnergyObjectives:
+    """Flux, net power through a closed box, and stored energy.
+
+    None of these needed a special case. Every supported detector accumulates
+    complex phasors linearly from the fields, and whatever it computes on top is
+    pure JAX above the VJP boundary, so the detector's own readout differentiates
+    itself: ``compute_poynting_flux``, ``compute_net_flux`` and a hand-written
+    energy integral all work through the same transpose. A closed box is six
+    state keys and therefore six adjoint currents, still driven in one solve.
+    """
+
+    _BOX_LO, _BOX_SPAN = _PML + 3, _N - 2 * (_PML + 3)
+
+    def _off_interp(self, det):
+        if getattr(det, "exact_interpolation", False):
+            return det.aset("exact_interpolation", False)
+        return det
+
+    def _scene(self, kind, sim_fs=120.0):
+        config = SimulationConfig(
+            time=sim_fs * 1e-15,
+            grid=UniformGrid(spacing=_RES),
+            backend="cpu",
+            dtype=jnp.float64,
+            courant_factor=0.99,
+            gradient_config=None,
+        )
+        objs, cons = [], []
+        vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
+        objs.append(vol)
+        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+        objs.extend(bd.values())
+        cons.extend(cl)
+        blk = fdtdx.UniformMaterialObject(
+            name="blk",
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            material=fdtdx.Material(permittivity=2.25),
+        )
+        cons.append(blk.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
+        objs.append(blk)
+        src, constraint = _narrowband_dipole("src", (_PML + 1, _N // 2, _N // 2))
+        cons.append(constraint)
+        objs.append(src)
+
+        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+        all6 = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+        if kind == "planar_flux":
+            mon = fdtdx.PhasorPoyntingFluxDetector(
+                name="mon",
+                partial_grid_shape=(1, self._BOX_SPAN, self._BOX_SPAN),
+                wave_characters=wcs,
+                direction="+",
+                scaling_mode="pulse",
+                dft_subsample=1,
+                dtype=jnp.complex128,
+            )
+            coords = (_N - _PML - 3, self._BOX_LO, self._BOX_LO)
+        elif kind == "box_net_flux":
+            mon = fdtdx.ClosedSurfacePhasorPoyntingFluxDetector(
+                name="mon",
+                partial_grid_shape=(self._BOX_SPAN,) * 3,
+                wave_characters=wcs,
+                scaling_mode="pulse",
+                dft_subsample=1,
+                dtype=jnp.complex128,
+            )
+            coords = (self._BOX_LO,) * 3
+        else:
+            mon = fdtdx.PhasorDetector(
+                name="mon",
+                partial_grid_shape=(self._BOX_SPAN,) * 3,
+                wave_characters=wcs,
+                components=all6,
+                scaling_mode="pulse",
+                dft_subsample=1,
+                exact_interpolation=False,
+                reduce_volume=False,
+                dtype=jnp.complex128,
+            )
+            coords = (self._BOX_LO,) * 3
+        mon = self._off_interp(mon)
+        cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=coords))
+        objs.append(mon)
+
+        des = fdtdx.PhasorDetector(
+            name="des",
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            wave_characters=wcs,
+            components=("Ex", "Ey", "Ez"),
+            scaling_mode="pulse",
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+        cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
+        objs.append(des)
+        return fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
+
+    @staticmethod
+    def _fom_for(kind, det):
+        if kind == "planar_flux":
+            return lambda state: -jnp.sum(det.compute_poynting_flux(state))
+        if kind == "box_net_flux":
+            return lambda state: -jnp.sum(det.compute_net_flux(state))
+
+        def energy(state):
+            p = state["phasor"][0]
+            return -(jnp.sum(jnp.abs(p[:, :3]) ** 2) + jnp.sum(jnp.abs(p[:, 3:]) ** 2))
+
+        return energy
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["planar_flux", "box_net_flux", "energy"],
+        ids=["planar_poynting_flux", "closed_box_net_power", "stored_energy"],
+    )
+    def test_matches_official_pipeline(self, kind):
+        objects, arrays, _, config, _ = self._scene(kind)
+        det = next(d for d in objects.detectors if d.name == "mon")
+        fom = self._fom_for(kind, det)
+        window = gaussian_window(int(config.time_steps_total))
+        cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+        def official(ie):
+            arrs = arrays.aset("inv_permittivities", ie)
+            _, out = fdtdx.run_fdtd(arrs, objects, cfg_ck, _KEY, show_progress=False)
+            return fom(out.detector_states["mon"])
+
+        fn = reciprocity_phasor_fn(
+            arrays,
+            objects,
+            config,
+            _KEY,
+            objective_detectors="mon",
+            design_detector="des",
+            window=window,
+        )
+
+        def recip(x):
+            out = fn(x)
+            return fom(out if isinstance(out, dict) else {"phasor": out})
+
+        ie = arrays.inv_permittivities
+        v_off, g_off = jax.value_and_grad(official)(ie)
+        v_rec, g_rec = jax.value_and_grad(recip)(ie)
+
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12), f"{kind}: forward values must match"
+        gs = next(d for d in objects.detectors if d.name == "des").grid_slice
+        a, b = g_rec[:, *gs], g_off[:, *gs]
+        rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+        cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
+        assert rel < 1e-4, f"{kind}: rel_L2 = {rel:.3e}"
+        assert cos > 1 - 1e-8, f"{kind}: cosine {cos:.10f}"
+
+    def test_closed_box_uses_one_adjoint_source_per_face(self):
+        objects, _arrays, _, config, _ = self._scene("box_net_flux", sim_fs=20.0)
+        window = gaussian_window(int(config.time_steps_total))
+        adj, names = derive_adjoint_objects(
+            objects=objects, config=config, objective_detectors="mon", window=window, key=_KEY
+        )
+        det = next(d for d in objects.detectors if d.name == "mon")
+        n_keys = len(det._shape_dtype_single_time_step())
+        assert n_keys == 6, f"expected six faces, got {n_keys}"
+        assert len(names[0]) == n_keys
+        for src in adj.sources:
+            thickness = [hi - lo for lo, hi in src.grid_slice_tuple]
+            assert sorted(thickness)[0] == 1, f"{src.name} is not a face slab: {thickness}"
+
+    def test_non_phasor_detector_is_refused(self):
+        """An energy detector accumulates no phasors, so there is no transpose."""
+        objects, arrays, _, config, _ = self._scene("energy", sim_fs=20.0)
+        window = gaussian_window(int(config.time_steps_total))
+        en = fdtdx.EnergyDetector(name="en", partial_grid_shape=(_N, _N, _N), reduce_volume=True)
+        en = en.place_on_grid(grid_slice_tuple=((0, _N), (0, _N), (0, _N)), config=config, key=_KEY)
+        broken = objects.aset("object_list", [*objects.object_list, en])
+        with pytest.raises(NotImplementedError, match="does not accumulate complex phasors"):
+            reciprocity_phasor_fn(
+                arrays,
+                broken,
+                config,
+                _KEY,
+                objective_detectors="en",
+                design_detector="des",
+                window=window,
+            )

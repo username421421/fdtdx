@@ -38,6 +38,7 @@ from fdtdx.objects.detectors.field_projection import (
     _surface_axis_direction,
     _surface_state_key,
 )
+from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 from fdtdx.objects.sources.source import Source
 
@@ -56,31 +57,81 @@ def is_box_projection(detector) -> bool:
     return isinstance(detector, FieldProjectionDetectorBase) and detector._projection_mode == "box"
 
 
+def _narrow(slice_tuple, axis: int, side: str):
+    """Return ``slice_tuple`` reduced to a one-cell face on ``axis``."""
+    bounds = list(slice_tuple)
+    lo, hi = bounds[axis]
+    bounds[axis] = (lo, lo + 1) if side in ("-", "min") else (hi - 1, hi)
+    return tuple(bounds)
+
+
 def face_slice_tuple(detector, surface: str):
     """Absolute grid slice of one box face, keeping its singleton normal axis.
 
     Mirrors the face slicing inside ``FieldProjectionDetectorBase.update``: the
-    ``"-"`` face is the first cell along the normal axis and ``"+"`` is the last.
+    ``"-"`` face is the first cell along the normal axis and ``"+"`` the last.
     """
     axis, direction = _surface_axis_direction(surface)
-    bounds = list(detector.grid_slice_tuple)
-    lo, hi = bounds[axis]
-    bounds[axis] = (lo, lo + 1) if direction == "-" else (hi - 1, hi)
-    return tuple(bounds)
+    return _narrow(detector.grid_slice_tuple, axis, direction)
 
 
 def detector_channels(detector, name: str) -> list[tuple[str, tuple]]:
-    """State keys and absolute face slices this detector needs adjoint currents for.
+    """State keys and absolute grid slices this detector needs adjoint currents for.
 
-    A plain phasor detector has one channel over its whole slice; a box
-    projection detector has one per included face.
+    Every supported objective detector stores complex phasors keyed either by a
+    single ``"phasor"`` entry over its whole slice, or by one entry per face of a
+    closed surface. Each entry needs its own adjoint current, because each is an
+    independent linear functional of the fields.
+
+    Recognised layouts:
+
+    * one ``"phasor"`` key, covering :class:`PhasorDetector` itself and
+      subclasses that only add a pure readout on top, such as
+      ``PhasorPoyntingFluxDetector.compute_poynting_flux`` and
+      ``ModeOverlapDetector``;
+    * ``phasor_{axis}_{minus,plus}``, the box-mode field projection detectors;
+    * ``phasor_axis{a}_{min,max}``, ``ClosedSurfacePhasorPoyntingFluxDetector``.
+
+    Args:
+        detector: a **placed** detector.
+        name: its name, for error messages.
+
+    Returns:
+        ``[(state_key, absolute_grid_slice_tuple), ...]``.
+
+    Raises:
+        NotImplementedError: if the state layout is not one of the above, since
+            guessing a face slice from an unknown key would silently put the
+            adjoint current in the wrong place.
     """
+    keys = sorted(detector._shape_dtype_single_time_step().keys())
+
+    if keys == ["phasor"]:
+        return [("phasor", detector.grid_slice_tuple)]
+
     if is_box_projection(detector):
         return [
             (_surface_state_key(surface), face_slice_tuple(detector, surface))
             for surface in detector._included_box_surfaces()
         ]
-    return [("phasor", detector.grid_slice_tuple)]
+
+    # ClosedSurfacePhasorPoyntingFluxDetector: phasor_axis{a}_{min,max}
+    if all(k.startswith("phasor_axis") for k in keys):
+        channels = []
+        for key in keys:
+            body = key[len("phasor_axis") :]
+            axis_text, _, side = body.partition("_")
+            if side not in ("min", "max") or not axis_text.isdigit():
+                raise NotImplementedError(f"detector {name!r}: cannot parse state key {key!r}")
+            channels.append((key, _narrow(detector.grid_slice_tuple, int(axis_text), side)))
+        return channels
+
+    raise NotImplementedError(
+        f"Detector {name!r} ({type(detector).__name__}) stores phasors under keys {keys}, which "
+        "this transpose does not recognise, so there is no way to know which cells each key "
+        "reads and where its adjoint current belongs. Record raw phasors with a PhasorDetector "
+        "and do the post-processing in JAX on top of the returned phasors instead."
+    )
 
 
 def derive_adjoint_objects(
@@ -131,6 +182,16 @@ def derive_adjoint_objects(
         detector = find_object(objects, det_name)
         if not isinstance(detector, Detector):
             raise ValueError(f"{det_name!r} is a {type(detector).__name__}, not a Detector")
+        # Check this before touching _angular_frequencies, which only phasor
+        # detectors have; otherwise a time-domain detector fails with an opaque
+        # AttributeError instead of the explanation below.
+        if not isinstance(detector, PhasorDetector):
+            raise NotImplementedError(
+                f"Detector {det_name!r} is a {type(detector).__name__}, which does not accumulate "
+                "complex phasors, so there is no linear transpose to take and no adjoint current "
+                "to place. Record phasors with a PhasorDetector and compute the quantity you want "
+                "in JAX on top of them."
+            )
         omegas = tuple(float(w) for w in detector._angular_frequencies)
         components = tuple(detector.components)
         made: list[str] = []
