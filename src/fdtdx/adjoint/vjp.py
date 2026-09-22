@@ -55,6 +55,7 @@ from fdtdx.config import SimulationConfig
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.fdtd import checkpointed_fdtd
 from fdtdx.objects.detectors.phasor import PhasorDetector
+from fdtdx.objects.object import INVALID_SLICE_TUPLE_3D
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 
 
@@ -96,7 +97,9 @@ def _reject_frozen_sources_in_design(objects, design_slice_tuple, skip=()):
         name = getattr(obj, "name", None)
         if name in skip or not hasattr(obj, "update_E"):
             continue
-        if getattr(obj, "_grid_slice_tuple", None) is None:
+        # INVALID_SLICE_TUPLE_3D, not None, is the unplaced sentinel; testing for
+        # None silently disabled this guard.
+        if getattr(obj, "_grid_slice_tuple", INVALID_SLICE_TUPLE_3D) == INVALID_SLICE_TUPLE_3D:
             continue
         if isinstance(obj, AdjointCurrentSource):
             continue  # reads inv_permittivities live, so the kernel is exact
@@ -143,6 +146,20 @@ def _validate_objective_detector(det, role: str) -> None:
             f"The {role} detector records {len(det.components)} components; box-mode field "
             "projection concatenates E and H and so needs all six (Ex, Ey, Ez, Hx, Hy, Hz)."
         )
+    if det.scaling_mode != "pulse":
+        raise NotImplementedError(
+            f"The {role} detector has scaling_mode={det.scaling_mode!r}. PhasorDetector defaults "
+            'to "continuous", which multiplies every recorded sample by 2/sum(window) instead of '
+            "1, so the design-region phasors no longer carry the scale the gradient kernel "
+            "assumes. Measured with the default: relative error 1.00 against run_fdtd, at cosine "
+            "1.00000000 -- a pure scale error that an optimizer with normalized steps would not "
+            'notice. Pass scaling_mode="pulse".'
+        )
+    if det.apodization is not None:
+        raise NotImplementedError(
+            f"The {role} detector has an apodization window. The transpose does not apply it to "
+            "the adjoint current, so the gradient would be scaled per time step. Remove it."
+        )
     if det._dft_stride != 1:
         raise NotImplementedError(
             f"The {role} detector has dft_subsample resolving to stride {det._dft_stride}; "
@@ -162,6 +179,33 @@ def _validate_objective_detector(det, role: str) -> None:
             "amount: measured 1.53e-02 relative at 12 cells per wavelength and 3.39e-03 at 24, "
             "i.e. it converges away as the grid is refined. The gradient itself is unaffected, "
             "matching run_fdtd to 6.4e-07 either way."
+        )
+
+
+def _validate_design_detector(det) -> None:
+    """The design detector must record exactly the three E components, in order.
+
+    ``assemble_material_gradient`` contracts the component axis of
+    ``Lambda * F`` against a scalar ``inv_permittivities``, which is only the
+    right sum when that axis is exactly ``(Ex, Ey, Ez)``.
+    :class:`PhasorDetector` defaults to all six, and summing the magnetic terms
+    in as well does not raise -- it returns a gradient that is simply wrong.
+    Measured against ``run_fdtd`` with the default components: relative error
+    3.80 at cosine **-0.473**, i.e. pointing backwards.
+    """
+    if is_box_projection(det):
+        raise NotImplementedError(
+            "The design detector must be a plain PhasorDetector, not a field projection detector."
+        )
+    expected = ("Ex", "Ey", "Ez")
+    if tuple(det.components) != expected:
+        raise NotImplementedError(
+            f"The design detector records components {tuple(det.components)}; it must record "
+            f"exactly {expected}, in that order. The gradient kernel contracts the component axis "
+            "against a scalar permittivity, so anything else silently sums the wrong terms: with "
+            "PhasorDetector's default of all six the measured error is 3.80 at cosine -0.473, a "
+            "gradient that points backwards with no error raised. Build it with "
+            "fdtdx.adjoint.design_phasor_detector to get this right by construction."
         )
 
 
@@ -236,8 +280,7 @@ def make_reciprocity_phasor_fn(
     for name, det in zip(det_names, obj_dets):
         _validate_objective_detector(det, f"objective {name!r}")
     _validate_objective_detector(des_det, "design")
-    if is_box_projection(des_det):
-        raise NotImplementedError("the design detector must be a plain PhasorDetector")
+    _validate_design_detector(des_det)
     if des_det.grid_shape != des_det_a.grid_shape:
         raise ValueError(
             f"design detector shape differs between scenes: forward {des_det.grid_shape} vs "

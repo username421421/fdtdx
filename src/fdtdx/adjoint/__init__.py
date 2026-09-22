@@ -14,7 +14,9 @@ traps behind them.
 """
 
 from fdtdx.adjoint.api import (
+    design_phasor_detector,
     design_region_slice,
+    objective_phasor_detector,
     reciprocity_param_fn,
     reciprocity_phasor_fn,
 )
@@ -30,10 +32,12 @@ from fdtdx.adjoint.vjp import make_reciprocity_phasor_fn
 __all__ = [
     "assemble_material_gradient",
     "derive_adjoint_objects",
+    "design_phasor_detector",
     "design_region_slice",
     "gaussian_window",
     "leapfrog_kernel",
     "make_reciprocity_phasor_fn",
+    "objective_phasor_detector",
     "reciprocity_param_fn",
     "reciprocity_phasor_fn",
     "solve_adjoint_amplitudes",

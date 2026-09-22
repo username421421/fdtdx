@@ -41,6 +41,7 @@ from fdtdx.objects.detectors.field_projection import (
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 from fdtdx.objects.sources.source import Source
+from fdtdx.typing import ProjectionSurface
 
 
 def find_object(objects: ObjectContainer, name: str):
@@ -65,7 +66,7 @@ def _narrow(slice_tuple, axis: int, side: str):
     return tuple(bounds)
 
 
-def face_slice_tuple(detector, surface: str):
+def face_slice_tuple(detector, surface: ProjectionSurface):
     """Absolute grid slice of one box face, keeping its singleton normal axis.
 
     Mirrors the face slicing inside ``FieldProjectionDetectorBase.update``: the

@@ -731,3 +731,137 @@ class TestFluxAndEnergyObjectives:
                 design_detector="des",
                 window=window,
             )
+
+
+class TestSilentMisconfiguration:
+    """Detector settings whose wrong value produced a wrong gradient, not an error.
+
+    Both of these are :class:`PhasorDetector`'s own defaults, so anyone building a
+    design-region detector without copying an example hit them. Measured against
+    ``run_fdtd(GradientConfig(checkpointed))`` on a 24^3 scene before the guards
+    existed:
+
+    ============================  ==========  ========
+    design detector                 rel L2     cosine
+    ============================  ==========  ========
+    ("Ex","Ey","Ez") + pulse        1.17e-06   1.00000
+    all six (default) + pulse       3.80      -0.473
+    ("Ex","Ey","Ez") + continuous   1.00       1.00000
+    ============================  ==========  ========
+
+    The six-component case points the gradient backwards. The continuous case is a
+    pure scale error, which an optimizer taking normalized steps would never
+    notice. Neither raised. These tests keep them raising.
+    """
+
+    def _placed(self, components, scaling):
+        config = SimulationConfig(
+            time=60e-15,
+            grid=UniformGrid(spacing=_RES),
+            backend="cpu",
+            dtype=jnp.float64,
+            courant_factor=0.99,
+            gradient_config=None,
+        )
+        objs, cons = [], []
+        vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
+        objs.append(vol)
+        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+        objs.extend(bd.values())
+        cons.extend(cl)
+        src, constraint = _narrowband_dipole("src", (_PML + 1, _N // 2, _N // 2))
+        cons.append(constraint)
+        objs.append(src)
+        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+        mon = fdtdx.PhasorDetector(
+            name="mon",
+            partial_grid_shape=(1, 1, 1),
+            wave_characters=wcs,
+            components=("Ez",),
+            scaling_mode="pulse",
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+        cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=_MON))
+        objs.append(mon)
+        des = fdtdx.PhasorDetector(
+            name="des",
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            wave_characters=wcs,
+            components=components,
+            scaling_mode=scaling,
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+        cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
+        objs.append(des)
+        o, a, _p, cfg, _ = fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
+        a, o, _ = apply_params(a, o, _p, _KEY)
+        return o, a, cfg
+
+    def test_six_component_design_detector_is_refused(self):
+        """PhasorDetector's default. Summing H into the contraction gave cosine -0.473."""
+        objects, arrays, config = self._placed(("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"), "pulse")
+        window = gaussian_window(int(config.time_steps_total))
+        with pytest.raises(NotImplementedError, match="must record exactly"):
+            reciprocity_phasor_fn(
+                arrays,
+                objects,
+                config,
+                _KEY,
+                objective_detectors="mon",
+                design_detector="des",
+                window=window,
+            )
+
+    def test_continuous_scaling_mode_is_refused(self):
+        """PhasorDetector's default. A pure scale error at cosine 1.0, invisible to an optimizer."""
+        objects, arrays, config = self._placed(("Ex", "Ey", "Ez"), "continuous")
+        window = gaussian_window(int(config.time_steps_total))
+        with pytest.raises(NotImplementedError, match="scaling_mode"):
+            reciprocity_phasor_fn(
+                arrays,
+                objects,
+                config,
+                _KEY,
+                objective_detectors="mon",
+                design_detector="des",
+                window=window,
+            )
+
+    def test_helpers_produce_an_accepted_configuration(self):
+        """The supported settings should be the easy ones to get."""
+        from fdtdx.adjoint import design_phasor_detector, objective_phasor_detector
+
+        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+        des = design_phasor_detector(
+            name="des",
+            wave_characters=wcs,
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            dtype=jnp.complex128,
+        )
+        mon = objective_phasor_detector(
+            name="mon",
+            wave_characters=wcs,
+            components=("Ez",),
+            partial_grid_shape=(1, 1, 1),
+            dtype=jnp.complex128,
+        )
+        assert tuple(des.components) == ("Ex", "Ey", "Ez")
+        assert des.scaling_mode == "pulse" and mon.scaling_mode == "pulse"
+        assert not des.exact_interpolation and not mon.exact_interpolation
+        assert not des.reduce_volume and not mon.reduce_volume
+        assert des.dft_subsample == 1 and mon.dft_subsample == 1
+
+    def test_helpers_refuse_to_be_overridden(self):
+        from fdtdx.adjoint import design_phasor_detector
+
+        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+        with pytest.raises(ValueError, match="Cannot override"):
+            design_phasor_detector(name="d", wave_characters=wcs, scaling_mode="continuous")
+        with pytest.raises(ValueError, match="Cannot override"):
+            design_phasor_detector(name="d", wave_characters=wcs, reduce_volume=True)
