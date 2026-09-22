@@ -1,0 +1,4291 @@
+
+
+===== PAGE 1 =====
+Tue, Jun 16 at 4:17 PM
+continue the dicsussion from last chat, what does 
+reciprocity mean for a general linear operator A, why this 
+makes A hermitian be represented as A transpose? I know 
+the only condition for A can be represented like that is that 
+A is not complex, but the maxwell equation in frequency is 
+complex, how does the recirpocity make that viable
+Thought for 1m 18s
+I’ll separate two issues that often get conflated: Hermitian adjoint under a conjugated inner
+product, versus transpose/reciprocal adjoint under an unconjugated bilinear pairing. That
+distinction is the key to why lossy complex-frequency Maxwell systems can still use “same-
+structure” adjoint solves under reciprocity.
+Reciprocity does not make  equal to  for a complex Maxwell operator.
+The correct statement is subtler:
+That is different from Hermiticity:
+For complex frequency-domain Maxwell systems, especially with loss,
+can hold while
+So reciprocity lets us replace a Hermitian-adjoint-looking derivation with a transpose-
+adjoint derivation, not because , but because the adjoint sensitivity can be
+formulated using an unconjugated transpose pairing.
+1. General linear-algebra meaning of reciprocity
+Suppose
+A† AT
+Reciprocity means the relevant Maxwell operator is symmetric under an uncon
+ A =A is a conjugated inner-product statement.†
+A =T A
+A =†
+A.
+A =† AT
+Ax =b,
+
+===== PAGE 2 =====
+where  may be complex.
+In ordinary complex Hilbert-space notation, the Hermitian adjoint  is defined by
+where
+Because the inner product conjugates the first argument,
+So yes: with the standard complex inner product,
+only if  is real.
+But reciprocity is not a statement about the Hermitian inner product. Reciprocity is a
+statement about an unconjugated bilinear pairing:
+or more generally,
+The transpose-adjoint  is defined by
+If , then
+A reciprocal operator is one satisfying
+With , this gives
+Therefore, for all ,
+A
+A†
+⟨u,Av⟩ = ⟨A u,v⟩,†
+⟨u,v⟩ =u v.∗T
+A =† A .∗T
+A =† AT
+A
+B(u,v) =u v,T
+B(u,v) =u Wv.T
+A  
+B
+T
+B(u,Av) =B(A  u,v).B
+T
+B(u,v) =u vT
+A  =B
+T A .T
+B(u,Av) =B(Au,v).
+B(u,v) =u vT
+u Av =T (Au) v =T u A v.T T
+u,v
+ A =A.T
+
+===== PAGE 3 =====
+That is the abstract meaning of reciprocity for a linear operator: the operator is self-
+adjoint under a bilinear transpose pairing, not under a conjugated Hermitian pairing.
+2. Complex symmetric is not Hermitian
+A complex reciprocal operator can be symmetric but not Hermitian.
+Example:
+Then
+So it is reciprocal/symmetric.
+But
+So it is not Hermitian.
+This is exactly the situation for a lossy reciprocal Maxwell system: the permittivity may be
+complex, so the operator is not Hermitian, but if the material tensors are symmetric, the
+operator can still be reciprocal.
+3. Maxwell example: reciprocal but complex
+Consider the frequency-domain electric-field equation
+with
+Here  and  may be complex.
+The transpose of , in the unconjugated sense, is
+A =   .[1 +i
+2
+2
+3 +i]
+A =T
+  =[1 +i
+2
+2
+3 +i] A.
+A =†
+  =[1 −i
+2
+2
+3 −i] A.
+AE =iωJ,
+A = ∇ ×μ ∇ ×−1 −ω ε.2
+ε μ
+A
+A =T ∇ ×μ ∇ ×−T −ω ε ,2 T
+
+===== PAGE 4 =====
+assuming boundary terms vanish or are handled consistently.
+If the medium is reciprocal,
+Then
+But the Hermitian adjoint is
+For a lossy dielectric,
+so
+If , then
+Therefore,
+which is generally not equal to .
+So:
+That is the central point.
+4. Why frequency-domain Maxwell being complex does not kill
+reciprocity
+The complex numbers in frequency-domain Maxwell come from two different sources:
+1. The phasor convention, through factors like .
+2. Material loss, through complex , , or conductivity.
+ε =T ε,
+μ =T μ.
+ A =A.T
+A =† ∇ ×μ ∇ ×−† −ω ε .2 †
+ε =ε +′ iε ,′′
+ε =† ε .∗T
+ε =T ε
+ε =† ε .∗
+A =† ∇ ×μ ∇ ×−∗ −ω ε ,2 ∗
+A
+ 
+Lossy reciprocal Maxwell: A =A, A =A.T †
+
+iω
+ε μ
+
+===== PAGE 5 =====
+Neither one automatically breaks reciprocity.
+Reciprocity is not the same as time-reversal symmetry.
+Loss breaks time-reversal symmetry because a lossy wave cannot simply be time-reversed
+without adding gain. But loss does not necessarily break source-receiver symmetry. A
+lossy reciprocal waveguide still has the same transmission coefficient from port 1 to port 2
+as from port 2 to port 1, assuming the ports are normalized consistently.
+So a lossy medium can be:
+That is why complex frequency-domain Maxwell operators can still satisfy
+even though they do not satisfy
+5. Where the adjoint-method confusion comes from
+In many derivations, one writes the field equation
+A perturbation gives
+Assume , so
+Now suppose the real figure of merit satisfies
+Using the standard Hermitian inner product, one introduces an adjoint field  satisfying
+Then
+This is the Hermitian-adjoint formulation.
+reciprocal but not Hermitian.
+A =T A
+A =† A.
+Ax =b.
+Aδx +δAx =δb.
+δb = 0
+Aδx = −δAx.
+δF = 2 Re g δx .[ † ]
+y
+A y =† g.
+δF = −2 Re y δAx .[ † ]
+
+===== PAGE 6 =====
+But the same real variation can also be written using an unconjugated bilinear form. Since
+define
+Then
+Now introduce the transpose-adjoint field  by
+Then
+Using
+we get
+So the transpose-adjoint formula is
+If the system is reciprocal,
+Therefore the adjoint solve is
+That means the adjoint simulation uses the same Maxwell operator as the forward
+simulation.
+No conjugated material is needed.
+6. Relationship between Hermitian adjoint and transpose adjoint
+g δx =† (g ) δx,∗ T
+q =g .∗
+δF = 2 Re q δx .[ T ]
+λ
+A λ =T q.
+q δx =T λ Aδx.T
+Aδx = −δAx,
+δF = −2 Re λ δAx .[ T ]
+ δF = −2 Re λ δAx , A λ =q.[ T ] T
+A =T A.
+ Aλ =q.
+
+===== PAGE 7 =====
+The two formulations are mathematically related.
+Hermitian form:
+Transpose form:
+Taking the complex conjugate of the transpose equation gives
+so
+Therefore,
+So the Hermitian-adjoint field  is the complex conjugate of the transpose-adjoint field .
+But physically and computationally, this matters a lot.
+If  is lossy and reciprocal, then
+so the transpose-adjoint simulation solves
+using the same lossy medium.
+The Hermitian-adjoint simulation solves
+which would require a conjugated medium:
+For loss, that would turn absorption into gain. That is usually not the physical adjoint
+simulation people run.
+A y =† g.
+A λ =T g .∗
+(A λ) =T ∗ g,
+A λ =† ∗ g.
+ y =λ .∗
+y λ
+A
+A =T A,
+Aλ =g ,∗
+A y =† g,
+ε →ε ,∗
+μ →μ .∗
+
+===== PAGE 8 =====
+So the practical adjoint method in reciprocal photonics usually uses the
+transpose/reciprocity formulation.
+7. The correct answer to your specific question
+You said:
+The answer is:
+Instead:
+Then the adjoint method is reformulated so that the needed adjoint operator is , not .
+For real-valued objectives,
+That allows a transpose-adjoint equation
+If the Maxwell system is reciprocal,
+so
+Therefore the adjoint field can be computed by running Maxwell again in the same
+physical medium, with an appropriately chosen adjoint source.
+8. Physical interpretation
+Hermitian adjoint roughly corresponds to a conjugated/time-reversed operator. In a lossy
+medium, that would require replacing loss by gain.
+Reciprocity instead says:
+I know the only condition for  to be represented as  is that  is not complex, but
+Maxwell equation in frequency is complex. How does reciprocity make that viable?
+A† AT A
+ Reciprocity does not make A =A .† T
+Reciprocity makes A =A under the unconjugated Maxwell bilinear pairing.T
+AT A†
+δF = 2 Re g δx =[ † ] 2 Re (g ) δx .[ ∗ T ]
+A λ =T g .∗
+A =T A,
+Aλ =g .∗
+
+===== PAGE 9 =====
+Mathematically, that is a transpose symmetry of the Green’s function:
+No complex conjugate appears.
+That is why complex lossy reciprocal systems are fine. The Green’s function can be
+complex and still satisfy
+It does not need to satisfy
+9. Practical inverse-design takeaway
+For photonic adjoint optimization:
+Lossless reciprocal dielectric
+Often both are effectively true:
+and, in an appropriate second-order formulation,
+So the distinction may not matter much.
+Lossy reciprocal dielectric or metal
+Usually:
+but
+So the reciprocal transpose-adjoint method still uses the same physical material, but the
+Hermitian-adjoint operator would require conjugated loss.
+The response at location/port 2 due to a source at location/port 1 equals the response
+at location/port 1 due to the corresponding reciprocal source at location/port 2.
+G  (r, r ) =ij
+′ G  (r , r).ji
+′
+G =T G.
+G =† G.
+A =T A,
+A =† A.
+A =T A,
+A =†
+A.
+
+===== PAGE 10 =====
+Nonreciprocal medium
+For example magneto-optic materials with bias:
+Then
+The adjoint simulation must use the transpose medium, which often corresponds to
+reversing the bias direction or transposing the constitutive tensors.
+Nonlinear medium
+Strictly, there is no single linear operator  unless you linearize around the forward
+solution. The adjoint operator is the transpose of the Jacobian of the nonlinear Maxwell
+residual. Reciprocity may or may not make that transpose equivalent to a physically simple
+simulation, depending on the nonlinear state and coupling terms.
+The cleanest summary is:
+So the viable adjoint solve in lossy reciprocal photonics is not based on pretending 
+. It is based on formulating the sensitivity with the transpose operator and then using
+reciprocity to identify  with the same Maxwell operator .
+ε =T
+ε.
+A =T
+A.
+A
+ Hermitian adjoint: A =A .† ∗T
+ Reciprocal transpose adjoint: A =A.T
+Complex Maxwell systems can be reciprocal because reciprocity uses no compl
+A =†
+AT
+AT A
+in short, reciprocal of a linear operator meaning A=A^T
+Thought for a couple of seconds
+Yes — in short, for a reciprocal linear system, the operator is transpose-symmetric, not
+necessarily Hermitian:
+ 
+A =AT
+
+===== PAGE 11 =====
+but this statement must be understood with the correct pairing/basis.
+More generally, reciprocity means
+for arbitrary excitations . This implies
+under the usual unconjugated bilinear product .
+If the natural pairing has a weight matrix , then reciprocity means
+so the precise condition is
+or, if ,
+For Maxwell systems, in the right source-field variables and with reciprocal materials,
+the Maxwell operator satisfies a transpose symmetry:
+or its weighted/discretized equivalent.
+But importantly:
+So a lossy reciprocal system can have
+while still having
+That is the main point: reciprocal means transpose-symmetric, not Hermitian-
+symmetric.
+u Av =T v AuT
+u,v
+ 
+A =AT
+u vT
+W
+u WAv =T v WAu,T
+ WA =A WT T
+W =WT
+ A W =WA.T
+ε =T ε, μ =T μ,
+ A =AT
+ A =A =A  in general.T
+
+†
+A =AT
+A =A .†
+
+===== PAGE 12 =====
+give me the mathematic definition of reciprocal in a easy 
+understanble way
+Thought for 9s
+A simple mathematical definition is:
+For a linear system
+let  be the field produced by source :
+Let  be the field produced by another source :
+The system is reciprocal if
+for any two sources  and .
+That means:
+Since
+reciprocity becomes
+This means the Green’s function or response operator is symmetric:
+A system is reciprocal if source 1 measured at 2 equals source 2 measured at 1.
+Ax =b,
+x  
+f f
+Ax  =f f.
+x  
+g g
+Ax
+ 
+=g g.
+ 
+g x
+ 
+=f xT
+f
+T
+g
+f g
+the response measured by  when  is the source equals the response measured by 
+when  is the source.
+g f f
+g
+x  =f A f, x  =−1
+g A g,−1
+g A f =T −1 f A g.T −1
+ A = (A )−1 −1 T
+
+===== PAGE 13 =====
+and, if  is invertible, this is equivalent to
+So yes, in the simplest matrix form:
+but remember: this is a transpose, not a Hermitian conjugate.
+For a complex matrix,
+does not mean
+Example of reciprocal but not Hermitian:
+Here,
+so it is reciprocal. But
+so it is not Hermitian.
+The key point is:
+No complex conjugation is involved. That is why a lossy complex Maxwell operator can
+still be reciprocal.
+A
+ A =A .T
+ reciprocal ⟺ A =AT
+A =AT
+A =A .†
+A =   .[1 +i
+2 +i
+2 +i
+3 ]
+A =T A,
+A =†
+A,
+ reciprocity uses u v,  not u v.T †
+but g and f and x_g and x_f are column vectors right
+Thought for a few seconds
+Yes. Usually
+
+===== PAGE 14 =====
+are all column vectors.
+For example,
+The system is
+Here  is an  matrix, and  are  column vectors.
+To form a scalar response, we transpose one vector:
+Since
+we get
+So yes:
+The reciprocity condition is
+Using
+this becomes
+f, g, x  , x  
+f g
+f =    , x  =
+f  
+1
+f  
+2
+⋮
+f  
+N
+f
+   .
+x  
+f ,1
+x  
+f ,2
+⋮
+x  
+f ,N
+Ax  =f f,
+Ax  =g g.
+A N ×N x  ,ff N × 1
+g x  .T
+f
+g =T
+    ,[g  
+1 g  
+2 ⋯ g  
+N ]
+g x  =T
+f
+ g  x  .
+i
+∑ i f ,i
+ g and f are column vectors, while g  and f  are row vectors.T T
+ 
+g x
+ 
+=f x
+ 
+.T
+f
+T
+g
+x  =f A f, x  =−1
+g A g,−1
+g A f =T −1 f A g.T −1
+
+===== PAGE 15 =====
+Since the left and right sides are scalars, we can rewrite
+Therefore reciprocity requires
+for arbitrary , so
+and therefore
+The important detail is that reciprocity uses
+not
+So even if , , and the fields are complex column vectors, the reciprocal pairing uses a
+plain transpose, not a conjugate transpose.
+f A g =T −1 f A g =( T −1 )
+T
+g (A ) f.T −1 T
+g A f =T −1 g (A ) fT −1 T
+f,g
+ A = (A )−1 −1 T
+ A =A .T
+g x
+ ,T f
+g x  .†
+f
+g f
+write down the maxwel equation for possible lossy but 
+linear and scalar local material and show me how it is 
+recirpocal meaning A=A^T
+Thought for 9s
+Yes. Let us write it carefully for a linear, local, scalar, possibly lossy material.
+Take the frequency convention
+Then Maxwell’s equations are
+For a linear local scalar material,
+e .−iωt
+∇ ×E =iωB,
+∇ ×H =J −iωD.
+
+===== PAGE 16 =====
+The material may be lossy, so
+may be complex.
+For example,
+with . This makes the operator non-Hermitian, but not necessarily non-reciprocal.
+1. Electric-field wave equation
+From
+we get
+Substitute into
+Then
+Multiply by :
+Therefore,
+Define the Maxwell operator
+D(r) =ε(r,ω)E(r),
+B(r) =μ(r,ω)H(r).
+ε(r,ω), μ(r,ω)
+ε =ε +′ iε′′
+ε =′′  0
+∇ ×E =iωμH,
+H =  μ ∇ ×iω
+1 −1 E.
+∇ ×H =J −iωεE.
+∇ ×  μ ∇ ×E =(iω
+1 −1 ) J −iωεE.
+iω
+∇ ×μ ∇ ×−1 E =iωJ +ω εE.2
+ 
+∇ ×μ ∇ × −ω ε E =iωJ.( −1 2 )
+ A = ∇ ×μ ∇ × −ω ε.−1 2
+
+===== PAGE 17 =====
+Then the equation is
+Here  can be complex because  and  can be complex.
+2. What we want to show
+For reciprocity, we want to show that
+where  means the transpose adjoint, not the Hermitian adjoint.
+Equivalently, for any two test fields ,
+Notice carefully: there is no complex conjugation.
+This is not
+It is the unconjugated bilinear pairing
+3. Prove the material part is symmetric
+The material part of  is
+Because  is scalar,
+just means pointwise multiplication.
+Then
+AE =iωJ.
+A ε μ
+ A =AT
+T
+E  ,E  
+1 2
+E  ⋅AE  dV = E  ⋅AE  dV .∫ 2 1 ∫ 1 2
+E  ⋅∫ 2
+∗ AE  dV .1
+ (E  ,E  )  = E  ⋅E  dV .2 1 T ∫ 2 1
+A
+−ω ε.2
+ε(r,ω)
+εE  
+1
+
+===== PAGE 18 =====
+Since scalar multiplication commutes,
+Therefore,
+So
+This is true even if  is complex.
+We did not use
+We only used that  is scalar.
+So loss does not break this transpose symmetry.
+4. Prove the curl-curl part is symmetric
+The curl-curl part is
+We want to compare
+and
+Use the vector identity
+This implies, after integration,
+E  ⋅∫ 2 −ω εE  dV =( 2
+1) −ω εE ⋅2 ∫ 2 E  dV .1
+E  ⋅2 E  =1 E  ⋅1 E  .2
+−ω εE
+ ⋅2 ∫ 2 E
+ 
+dV =1 −ω εE
+ ⋅2 ∫ 1 E
+ 
+dV .2
+ E  ⋅ −ω εE  dV = E  ⋅ −ω εE  dV .∫ 2 ( 2
+1) ∫ 1 ( 2
+2)
+ε
+ε =∗ ε.
+ε
+∇ ×μ ∇ ×−1 .
+E
+ ⋅∫ 2 ∇ ×μ ∇ ×−1 E
+ 
+dV1
+E
+ ⋅∫ 1 ∇ ×μ ∇ ×−1 E
+ 
+dV .2
+∇ ⋅ (F ×G) =G ⋅ ∇ ×F −F ⋅ ∇ ×G.
+
+===== PAGE 19 =====
+Now let
+Then
+equals
+If the boundary term vanishes, for example for closed metallic boundaries, periodic
+boundaries with matching phases, radiation boundaries, or properly paired ports, then
+Since  is scalar,
+Therefore,
+Applying the same integration-by-parts identity in reverse gives
+Again, this is true even if  is complex.
+We did not require
+We only required scalar , locality, linearity, and compatible boundary conditions.
+F ⋅∫ ∇ ×GdV = G ⋅∫ ∇ ×FdV −  (F ×∫
+∂V
+G) ⋅ dS.n^
+F =E  ,2
+G =μ ∇ ×−1 E  .1
+E  ⋅∫ 2 ∇ × μ ∇ ×E  dV( −1
+1)
+μ ∇ ×E  ⋅∫ ( −1
+1) ∇ ×E  dV −2
+ E  × μ ∇ ×E  ⋅∫
+∂V
+[ 2 ( −1
+1)] dS.n^
+E  ⋅∫ 2 ∇ ×μ ∇ ×−1 E  dV =1 μ (∇ ×∫ −1 E  ) ⋅1 (∇ ×E  )dV .2
+μ
+μ (∇ ×−1 E
+ 
+) ⋅1 (∇ ×E
+ 
+) =2 μ (∇ ×−1 E
+ 
+) ⋅2 (∇ ×E
+ 
+).1
+μ (∇ ×∫ −1 E  ) ⋅1 (∇ ×E  )dV =2 μ (∇ ×∫ −1 E  ) ⋅2 (∇ ×E  )dV .1
+ E  ⋅ ∇ ×μ ∇ ×E  dV = E  ⋅ ∇ ×μ ∇ ×E  dV .∫ 2
+−1
+1 ∫ 1
+−1
+2
+μ
+μ =∗ μ.
+μ
+
+===== PAGE 20 =====
+5. Therefore the full Maxwell operator is reciprocal
+Combining the curl-curl part and the material part,
+we have
+This is the continuum version of
+For arbitrary fields , this implies
+So the frequency-domain Maxwell operator in a linear, local, scalar medium is reciprocal:
+But it is not necessarily Hermitian:
+if  or  is complex.
+6. Reciprocity between two sources
+Suppose two electric current sources  and  generate fields  and :
+Using the transpose symmetry,
+Substitute the source equations:
+A = ∇ ×μ ∇ ×−1 −ω ε,2
+E  ⋅AE  dV = E  ⋅AE  dV .∫ 2 1 ∫ 1 2
+ E  AE  =E  AE  .2
+T
+1 1
+T
+2
+E
+ 
+,E
+ 
+1 2
+ 
+A =A .T
+ A =A.T
+ 
+A =A†
+
+ε μ
+J  
+1 J  
+2 E  
+1 E  
+2
+AE  =1 iωJ  ,1
+AE
+ 
+=2 iωJ
+ 
+.2
+E  ⋅∫ 2 AE  dV =1 E  ⋅∫ 1 AE  dV .2
+E  ⋅∫ 2 iωJ  dV =1 E  ⋅∫ 1 iωJ  dV .2
+
+===== PAGE 21 =====
+Cancel :
+Equivalently,
+This is Lorentz reciprocity.
+It says:
+No complex conjugation appears.
+7. Matrix version
+After discretization, the Maxwell equation becomes
+Here
+are column vectors and  is a matrix.
+For two sources,
+If the discretization preserves the unconjugated integration-by-parts symmetry, then
+Then
+Substitute the source equations:
+iω
+E  ⋅J  dV = E  ⋅J  dV .∫ 2 1 ∫ 1 2
+J  ⋅E  dV = J  ⋅E  dV .∫ 1 2 ∫ 2 1
+the field produced by source 1, measured by source 2, equals the field produced by
+source 2, measured by source 1.
+AE =iωJ.
+E,J
+A
+AE  =1 iωJ  ,1
+AE  =2 iωJ  .2
+ A =A.T
+E  AE  =2
+T
+1 E  AE  .1
+T
+2
+
+===== PAGE 22 =====
+Cancel :
+Or equivalently,
+That is the matrix version of reciprocity.
+8. Why loss does not break this
+If the material is lossy,
+then  is complex.
+So generally,
+But the transpose is
+which does not conjugate the complex coefficients.
+For scalar material,
+Therefore,
+even if
+So:
+E  iωJ  =2
+T
+1 E  iωJ  .1
+T
+2
+iω
+ 
+E
+ 
+J
+ 
+=E
+ 
+J
+ 
+.2
+T 1 1
+T 2
+ J  E  =J  E  .1
+T
+2 2
+T
+1
+ε =ε +′ iε ,′′
+A
+A =† (A ) =∗ T
+A.
+A ,T
+ε =T ε,
+μ =T μ.
+ A =AT
+ε =∗
+ε, μ =∗
+μ.
+ loss breaks Hermiticity, but not necessarily reciprocity.
+
+===== PAGE 23 =====
+9. Final compact statement
+For a linear, local, scalar material,
+with possibly complex , the electric-field Maxwell operator is
+It satisfies
+under the unconjugated bilinear product, so in matrix notation,
+But if the medium is lossy,
+Therefore, a lossy scalar Maxwell system is usually:
+D =εE, B =μH,
+ε,μ
+ A = ∇ ×μ ∇ × −ω ε.−1 2
+ E  ⋅AE  dV = E  ⋅AE  dV∫ 2 1 ∫ 1 2
+ A =A.T
+ 
+A =A.†
+
+ reciprocal but non-Hermitian.
+so the discrete curl curl matrix is reciprocal and as long as 
+the material is a diagonal matrix, A is reciprocal? also what 
+does conjugated bilinear mean
+Thought for 29s
+The short answer is “yes, but with the right discrete pairing.” A diagonal complex material
+matrix is transpose-symmetric, but the curl discretization and field weights determine
+whether you see literal  or a weighted version of it.A =AT
+Yes — with one important nuance:
+The curl-curl operator is reciprocal, not necessarily the raw curl matrix by itsel
+
+===== PAGE 24 =====
+In a good discretization, the electric-field Maxwell system looks like
+with
+Here:
+Then
+Using
+we get
+So if
+and
+then
+For a linear, local, scalar material, the material matrices are usually diagonal:
+Even if each  is complex,
+AE =iωJ,
+ A =C M  C −ω M  .T
+μ−1
+2
+ε
+C = discrete curl matrix,
+M  =μ−1 discrete material matrix for μ ,−1
+M  =ε discrete material matrix for ε.
+A =T C M  C −( T
+μ−1 )
+T
+ω M  .2
+ε
+T
+(XYZ) =T Z Y X ,T T T
+A =T C M  C −T
+μ−1
+T ω M  .2
+ε
+T
+M  =μ−1
+T M  ,μ−1
+M  =ε
+T M  ,ε
+ A =A.T
+M
+ 
+=ε
+     .
+ε  
+1
+0
+0
+0
+ε  
+2
+0
+0
+0
+⋱
+ε
+ 
+i
+M  =ε
+T M  .ε
+
+===== PAGE 25 =====
+So yes:
+Therefore, assuming the boundary conditions and discretization preserve the integration-
+by-parts symmetry,
+That is the discrete version of reciprocity.
+But be careful: diagonal complex does not imply Hermitian.
+For example,
+Then
+but
+So the material is reciprocal but lossy/non-Hermitian.
+Therefore:
+but generally
+Important nuance: the curl matrix itself
+The raw discrete curl matrix  is not usually symmetric:
+That is fine.
+ complex diagonal material ⇒ transpose-symmetric material matrix.
+ A =A .T
+M  =ε
+ .[2 +i
+0
+0
+3 + 2i]
+M  =ε
+T M  ,ε
+M  =ε
+†
+  =[2 −i
+0
+0
+3 − 2i] M  .ε
+ A =AT
+ 
+A =A .
+†
+C
+C =T
+C.
+
+===== PAGE 26 =====
+The reciprocal curl-curl operator has the form
+This is symmetric if  is symmetric:
+So it is more accurate to say:
+What does “unconjugated bilinear” mean?
+For complex vectors  and , there are two common ways to form a scalar.
+1. Unconjugated bilinear pairing
+No complex conjugation appears.
+Example:
+Then
+So
+This pairing is bilinear because it is linear in both  and .
+For example,
+and
+ C M  C.T
+μ−1
+M  
+μ−1
+C M  C =( T
+μ−1 )
+T
+C M  C =T
+μ−1
+T C M  C.T
+μ−1
+the discrete curl-curl operator is reciprocal/symmetric, not necessarily the curl 
+u v
+ u v =  u  v  .T
+i
+∑ i i
+u =  , v =[1 +i
+2 ]  .[ 3
+4 −i]
+u v =T (1 +i)(3) + 2(4 −i).
+u v =T 3 + 3i + 8 − 2i = 11 +i.
+u v
+(αu) v =T αu v,T
+u (αv) =T αu v.T
+
+===== PAGE 27 =====
+No conjugation appears.
+This is the pairing used in the transpose-adjoint/reciprocity formulation.
+2. Hermitian inner product
+The usual complex inner product is
+Now the first vector is complex-conjugated.
+Using the same example,
+So
+This is different from
+The Hermitian inner product is not bilinear. It is called sesquilinear because it is
+conjugate-linear in one argument and linear in the other.
+For example,
+The scalar gets conjugated.
+Why this matters
+Reciprocity uses the unconjugated bilinear pairing:
+This leads to
+Hermitian symmetry uses the conjugated inner product:
+ u v =u v =  u  v  .† ∗T
+i
+∑ i
+∗
+i
+u v =† (1 −i)(3) + 2(4 −i).
+u v =† 3 − 3i + 8 − 2i = 11 − 5i.
+u v =T 11 +i.
+(αu) v =† α u v.∗ †
+ u Av =v Au.T T
+ A =A .T
+
+===== PAGE 28 =====
+This leads to
+These are different statements.
+For a lossy but reciprocal Maxwell operator:
+but
+Final short version
+Yes:
+A complex diagonal material matrix is still transpose-symmetric:
+But it is not Hermitian unless it is real:
+And “unconjugated bilinear” means using
+instead of
+No complex conjugation is applied.
+ u Av = (Au) v.† †
+ A =A .†
+ A =AT
+ A =A .
+†
+If the discrete curl-curl operator is built symmetrically and the material matric
+M =T M.
+M =† M only if M =∗ M.
+ u vT
+ u v.†
+
+===== PAGE 29 =====
+isnt the bilinear just mean a dot product between two 
+vectors
+Thought for a couple of seconds
+Yes — almost.
+For real vectors, the ordinary dot product is bilinear:
+So for real-valued vectors, saying “unconjugated bilinear product” is basically the same as
+saying “ordinary dot product.”
+But for complex vectors, there are two different things people may call a “dot product.”
+1. Unconjugated bilinear product
+No complex conjugation.
+Example:
+Then
+This is the product used in the reciprocity / transpose-adjoint derivation.
+2. Hermitian inner product
+In complex linear algebra, the standard inner product is usually
+u ⋅v =u v =T
+ u  v  .
+i
+∑ i i
+ u v =  u  v  
+T
+i
+∑ i i
+u =  , v =[1 +i
+2 ]  .[ 3
+4 −i]
+u v =T (1 +i)3 + 2(4 −i)
+= 3 + 3i + 8 − 2i
+= 11 +i.
+
+===== PAGE 30 =====
+The first vector is conjugated.
+Using the same vectors,
+So
+in general.
+Why I avoided just saying “dot product”
+Because in complex-vector contexts, “dot product” is ambiguous.
+Some people mean:
+while others mean the proper complex inner product:
+For reciprocity, we specifically mean the unconjugated dot product:
+That is why reciprocity gives
+instead of
+So the clean answer is:
+ u v =  u  v  .†
+i
+∑ i
+∗
+i
+u v =† (1 −i)3 + 2(4 −i)
+= 3 − 3i + 8 − 2i
+= 11 − 5i.
+ u v =u vT
+
+†
+u vT
+u v.†
+ 
+u v.T
+ A =AT
+ 
+A =A .†
+ Yes, bilinear here means an unconjugated dot product between two vectors.
+
+===== PAGE 31 =====
+But for complex fields, we must explicitly say unconjugated, because the usual complex
+inner product uses conjugation.
+so the unconjugated bilinear product just two complex 
+vectors such that people usually use the hermitian inner 
+product to define the dot product but without the conjugate
+Thought for a few seconds
+Yes. That is exactly right.
+For two complex column vectors
+the unconjugated bilinear product is
+It is like the usual real-vector dot product, but extended to complex vectors without taking
+any complex conjugate.
+By contrast, the usual complex inner product is
+So yes:
+The reason people avoid simply calling it a “dot product” is that, in complex linear algebra,
+“dot product” usually means the Hermitian inner product:
+But reciprocity uses
+u =    , v =
+u  
+1
+u  
+2
+⋮
+   ,
+v  
+1
+v  
+2
+⋮
+ u v =  u  v  .T
+i
+∑ i i
+ 
+u v =
+ 
+u
+ 
+v
+ 
+.†
+i
+∑ i
+∗
+i
+unconjugated bilinear product = complex dot product without conjugation.
+u v.†
+u v,T
+
+===== PAGE 32 =====
+not
+The distinction matters because
+moves  by transpose:
+so the associated adjoint operator is
+But
+moves  by Hermitian conjugate:
+so the associated adjoint operator is
+Therefore:
+while
+One more important point:  is not a true inner product for complex vectors because it is
+not positive definite. For example, if
+then
+u v.†
+u AvT
+A
+u Av =T (A u) v,T T
+ 
+.AT
+u Av†
+A
+u Av =† (A u) v,† †
+ 
+.A†
+ reciprocity uses u v ⇒AT T
+ Hermitian energy/norm inner product uses u v ⇒A .† †
+u vT
+u =  ,[1
+i]
+u u =T 1 +2 i =2 1 − 1 = 0,
+
+===== PAGE 33 =====
+even though .
+But
+So  is useful for reciprocity and transpose symmetry, while  is useful for
+energy, norms, and Hermitian adjoints.
+u = 0
+u u =† ∣1∣ +2 ∣i∣ =2 2.
+u vT u v†
+ok, now give me the adjoint derivation in full again in detail
+Thought for 1m 0s
+I’ll derive it using the transpose/reciprocity form, because that is the version compatible
+with complex lossy but reciprocal Maxwell systems. I’ll keep the signs and source
+normalization explicit so you can map it directly to a simulation run.
+Below is the full reciprocity-based adjoint derivation for frequency-domain Maxwell,
+using the transpose adjoint, not the Hermitian adjoint.
+I will assume:
+time convention, and a linear, local, scalar, possibly lossy material:
+Here  and  may be complex.
+1. Forward Maxwell problem
+Frequency-domain Maxwell equations are
+Using
+we get
+e−iωt
+D =ε(r,ρ)E, B =μ(r,ρ)H.
+ε μ
+∇ ×E =iωB,
+∇ ×H =J −iωD.
+B =μH, D =εE,
+
+===== PAGE 34 =====
+Eliminate . From the first equation,
+Substitute into the second equation:
+Multiply by :
+Rearrange:
+Define
+Then the forward problem is
+where
+2. Design variable
+Let  be the design parameter. For example,  may control the permittivity:
+The field depends on  through Maxwell’s equation:
+Usually the source , and therefore , is fixed during optimization.
+We want the derivative of a real figure of merit:
+∇ ×E =iωμH,
+∇ ×H =J −iωεE.
+H
+H =  μ ∇ ×iω
+1 −1 E.
+∇ ×
+ 
+μ ∇ ×E =(iω
+1 −1 ) J −iωεE.
+iω
+∇ ×μ ∇ ×−1 E =iωJ +ω εE.2
+ ∇ ×μ ∇ × −ω ε E =iωJ.( −1 2 )
+ A(ρ) = ∇ ×μ (ρ)∇ × −ω ε(ρ).−1 2
+ A(ρ)E =b,
+ b =iωJ.
+ρ ρ(r)
+ε(r) =ε(r,ρ).
+ρ
+A(ρ)E(ρ) =b.
+J b
+
+===== PAGE 35 =====
+For example:
+or a mode-overlap power:
+3. Perturb the forward equation
+Perturb . Then
+The perturbed Maxwell equation is
+Expand to first order:
+Since the original forward equation is
+we get
+Therefore,
+If the source is independent of design, then
+so
+ F =F(E,ρ) ∈ R.
+F = ∣E
+ 
+(r
+ 
+)∣ ,z 0 2
+F = ∣a∣ .2
+ρ →ρ +δρ
+A →A +δA,
+E →E +δE,
+b →b +δb.
+(A +δA)(E +δE) =b +δb.
+AE +AδE +δAE =b +δb.
+AE =b,
+AδE +δAE =δb.
+ AδE =δb −δAE.
+δb = 0,
+ AδE = −δAE.
+
+===== PAGE 36 =====
+This is the expensive part: directly solving for  for every design variable would require
+many simulations.
+The adjoint method avoids that.
+4. Variation of the figure of merit
+Because  is real, its first-order variation can be written as
+Here  is the objective derivative source.
+In discrete notation,
+Important: this uses the unconjugated bilinear product
+not
+The term  means any explicit dependence of  on  not through the field. Usually
+this is zero.
+So the central problem is:
+But  depends on , and computing  for every  is expensive.
+5. Define the adjoint field
+We introduce an adjoint field  satisfying
+This is the transpose-adjoint equation.
+Now,
+δE
+F
+ δF = 2 Re q(r) ⋅δE(r)dV +δF  .∫ direct
+q
+ δF = 2 Re q δE +δF  .[ T ] direct
+q δE,T
+q δE.†
+δF  
+direct F ρ
+δF = 2 Re q δE .[ T ]
+δE δρ δE δρ
+λ
+ A λ =q.T
+
+===== PAGE 37 =====
+Using
+we get
+But from the perturbed forward equation,
+Therefore,
+So
+Thus,
+If the source does not depend on design, then , so
+This is the core adjoint result.
+6. Use reciprocity
+For a reciprocal Maxwell system,
+Therefore the adjoint equation
+becomes
+q δE =T (A λ) δE.T T
+(A λ) =T T λ A,T
+q δE =T λ AδE.T
+AδE =δb −δAE.
+q δE =T λ (δb −T δAE).
+q δE =T λ δb −T λ δAE.T
+ δF = 2 Re λ δb −λ δAE +δF  .[ T T ] direct
+δb = 0
+ δF = −2 Re λ δAE +δF  .[ T ] direct
+ A =A.T
+A λ =T q
+ Aλ =q.
+
+===== PAGE 38 =====
+This means the adjoint field  can be computed by solving the same Maxwell operator as
+the forward problem.
+For the electric-field Maxwell equation,
+So if the adjoint equation is
+then it is equivalent to a Maxwell solve with adjoint current  satisfying
+Therefore,
+So the adjoint simulation is:
+with
+The adjoint source is placed where the objective is measured.
+7. Sensitivity for permittivity design
+Now assume the design only changes , not .
+The Maxwell operator is
+So
+Then
+λ
+AE =iωJ.
+Aλ =q,
+J  
+adj
+iωJ
+ 
+=adj q.
+ J  =  .adj iω
+q
+ Aλ =iωJ  ,adj
+ J  =  .adj iω
+q
+ε μ
+A = ∇ ×μ ∇ ×−1 −ω ε.2
+δA = −ω δε.2
+δAE = −ω δεE.2
+
+===== PAGE 39 =====
+Insert this into
+We get
+Therefore,
+In continuum notation,
+If
+then
+Therefore,
+with
+This is the standard adjoint gradient formula for permittivity design.
+Important: the product is
+not
+δF = −2 Re λ δAE .[ T ]
+δF = −2 Re λ −ω δεE .[ T ( 2 )]
+ δF = 2ω Re λ δεE .2 [ T ]
+ δF = 2ω Re λ(r) ⋅E(r)δε(r)dV .2 ∫
+ε =ε(ρ),
+δε =  δρ.∂ρ
+∂ε
+ δF =  δρ(r)dV ,∫ ∂ρ(r)
+∂F
+  
+= 2ω Re λ(r) ⋅E(r)
+ 
+.∂ρ(r)
+∂F 2 [ ∂ρ
+∂ε(r)]
+λ ⋅E,
+λ ⋅∗ E.
+
+===== PAGE 40 =====
+No complex conjugation appears inside the reciprocal transpose-adjoint product. The only
+complex operation at the end is taking the real part because  is real.
+8. Sensitivity for permeability design
+If  also depends on design, then
+The perturbation is
+Then
+In continuum form,
+Using integration by parts and dropping boundary terms,
+So
+For most dielectric inverse design,  is fixed, so only the -term remains.
+9. Discrete matrix form
+In a discretized system, the electric-field equation often has the form
+with
+Here:
+F
+μ
+A = ∇ ×μ ∇ ×−1 −ω ε.2
+δA = ∇ ×δ(μ )∇ ×−1 −ω δε.2
+δF = −2 Re λ ∇ ×δ(μ )∇ ×E −ω δεE .[ T ( −1 2 )]
+δF = −2 Re λ ⋅∫ ∇ × δ(μ )∇ ×E dV +[ −1 ] 2ω Re λ ⋅2 ∫ EδεdV .
+λ ⋅∫ ∇ × δ(μ )∇ ×E dV =[ −1 ] (∇ ×∫ λ) ⋅δ(μ )(∇ ×−1 E)dV .
+ δF = −2 Re (∇ ×λ) ⋅δ(μ )(∇ ×E)dV + 2ω Re λ ⋅EδεdV .∫ −1 2 ∫
+μ ε
+ AE =b,
+ A =C M  C −ω M  .T
+μ−1
+2
+ε
+
+===== PAGE 41 =====
+For scalar local materials,  and  are diagonal. They may be complex, but they still
+satisfy
+Therefore,
+Using
+we get
+Because the material matrices are symmetric,
+So
+Then the adjoint equation is
+The gradient is
+For permittivity-only design,
+so
+C = discrete curl matrix,
+M  =μ−1 material matrix for μ ,−1
+M  =ε material matrix for ε.
+M
+ 
+ε M
+ 
+μ−1
+M  =ε
+T M  ,ε
+M
+ =μ−1
+T M
+ 
+.μ−1
+A =T (C M  C) −T
+μ−1 T ω M  .2
+ε
+T
+(XYZ) =T Z Y X ,T T T
+A =T C M
+ 
+C −T
+μ−1
+T ω M
+ .2
+ε
+T
+A =T C M  C −T
+μ−1 ω M  .2
+ε
+ A =A.T
+ Aλ =q.
+ 
+δF = −2 Re λ δAE .[ T ]
+δA = −ω δM  ,2
+ε
+ δF = 2ω Re λ δM  E .2 [ T
+ε ]
+
+===== PAGE 42 =====
+If  is diagonal, then
+Therefore,
+If , then
+With cell volumes or grid weights, those weights must be included consistently.
+10. Example: point-field intensity objective
+Suppose the objective is field intensity at a point  along polarization :
+Define
+Then
+A small field perturbation gives
+So
+Substitute :
+This matches
+M  
+ε
+λ δM
+ 
+E =T ε
+ 
+λ
+ 
+E
+ 
+δε
+ .
+i
+∑ i i i
+  = 2ω Re λ  E  .∂ε  
+i
+∂F 2 [ i i]
+ε  =i ε  (ρ  )i i
+  = 2ω Re λ  E   .∂ρ  
+i
+∂F 2 [ i i ∂ρ  
+i
+∂ε  
+i ]
+r  
+0 e^
+F = ∣ ⋅e^ E(r  )∣ .0
+2
+s = ⋅e^ E(r  ).0
+F =s s.∗
+δs = ⋅e^ δE(r
+ 
+).0
+δF =s δs +∗ sδs =∗ 2 Re s δs .[ ∗ ]
+δs
+δF = 2 Re s ⋅δE(r  ) .[ ∗e^ 0 ]
+δF = 2 Re q(r) ⋅∫ δE(r)dV .
+
+===== PAGE 43 =====
+Therefore,
+The adjoint equation is
+Equivalently, the adjoint current is
+So to compute the adjoint field, place a current source at the measurement point ,
+polarized along , with amplitude proportional to .
+Then the gradient is
+11. Example: mode-overlap objective
+Suppose the objective is power coupled into a target mode. Define a mode amplitude
+Then
+The variation is
+Since
+we get
+Therefore,
+ q(r) =s δ(r − r  ).∗e^ 0
+Aλ =q.
+ J  (r) =  δ(r − r  ).adj iω
+s∗
+e^ 0
+r
+ 
+0
+e^ s∗
+  = 2ω Re λ(r) ⋅E(r)  .∂ρ(r)
+∂F 2 [ ∂ρ
+∂ε ]
+a =m E =T
+ m(r) ⋅∫
+S
+E(r)dS.
+F = ∣a∣ .2
+δF = 2 Re a δa .[ ∗ ]
+δa =m δE,T
+δF = 2 Re a m δE .[ ∗ T ]
+
+===== PAGE 44 =====
+The adjoint equation is
+Equivalently,
+Physically, this means:
+Its amplitude is proportional to the complex conjugate of the measured forward overlap .
+Then use
+12. Why this uses reciprocity, not Hermiticity
+The transpose-adjoint equation is
+For a reciprocal system,
+so
+That is why the adjoint simulation uses the same material as the forward simulation.
+But if the medium is lossy, then generally
+For example, if
+ q =a m.∗
+ Aλ =a m.∗
+ J  =  .adj iω
+a m∗
+put the adjoint source at the output monitor, with the target-mode spatial pro
+a∗
+  = 2ω Re λ(r) ⋅E(r)  .∂ρ(r)
+∂F 2 [ ∂ρ
+∂ε ]
+A λ =T q.
+A =T A,
+Aλ =q.
+A =†
+A.
+ε =ε +′ iε ,′′
+
+===== PAGE 45 =====
+then
+so the Hermitian-adjoint operator would involve
+That would turn loss into gain.
+The reciprocity-based adjoint method avoids this because it uses
+not
+So in lossy reciprocal media:
+13. Final compact formula
+Forward solve:
+Objective variation:
+Adjoint solve:
+For reciprocal Maxwell systems:
+Gradient:
+For permittivity-only design:
+ε =† ε ,∗
+ε →ε .∗
+A ,T
+A .†
+ A =A, A =A.T †
+
+ A(ρ)E =b.
+ 
+δF = 2 Re q δE .[ T ]
+ A λ =q.T
+ Aλ =q.
+ δF = −2 Re λ δAE .[ T ]
+
+===== PAGE 46 =====
+so
+Therefore,
+This is the reciprocal adjoint-design formula for a linear, local, scalar, possibly lossy
+Maxwell system.
+ δA = −ω δε,2
+ 
+δF = 2ω Re λ(r) ⋅E(r)δε(r)dV .2 ∫
+  = 2ω Re λ(r) ⋅E(r)  .∂ρ(r)
+∂F 2 [ ∂ρ
+∂ε(r)]
+dont write it in the perturbation way, write it in derivative 
+way
+Thought for 16s
+Yes. Let us write the adjoint derivation using ordinary derivatives with respect to a design
+parameter , not perturbations.
+We start from the discrete frequency-domain Maxwell equation:
+where
+Here  is the forward field,  is a design variable, and  is the source vector.
+1. Differentiate the forward equation
+Start with
+Differentiate both sides with respect to :
+p
+ A(p)E(p) =b(p)
+A(p) =C M  (p)C −T
+μ−1 ω M  (p).2
+ε
+E p b =iωJ
+A(p)E(p) =b(p).
+p
+
+===== PAGE 47 =====
+Using the product rule,
+Therefore,
+If the source does not depend on the design, then
+so
+This equation tells us how the field derivative  depends on the design derivative .
+2. Differentiate the figure of merit
+Let the figure of merit be
+with
+For a real-valued objective, write its derivative as
+Here  is the objective-gradient source, defined by the field dependence of .
+The term
+ 
+A(p)E(p) =dp
+d [ ]
+ .dp
+db
+ E +dp
+dA A  =dp
+dE
+ .dp
+db
+ A  =  −  E.dp
+dE
+dp
+db
+dp
+dA
+ =dp
+db 0,
+ 
+A
+ 
+= −
+ 
+E.dp
+dE
+dp
+dA
+ 
+dp
+dE
+ 
+dp
+dA
+F =F(E(p),p),
+F ∈ R.
+  = 2 Re q  +    .dp
+dF [ T
+dp
+dE ] ∂p
+∂F
+E
+q F
+   
+∂p
+∂F
+E
+
+===== PAGE 48 =====
+means the direct dependence of  on , holding the field fixed. In many photonic inverse-
+design problems this term is zero.
+So if  depends on  only through the field,
+Important: this is the unconjugated transpose product
+not
+3. Define the adjoint field
+Define the adjoint field  by
+This is the transpose-adjoint equation.
+Then
+Since
+we get
+Now use the differentiated forward equation:
+Therefore,
+F p
+F p
+  = 2 Re q  .dp
+dF [ T
+dp
+dE ]
+q  ,T
+dp
+dE
+q  .†
+dp
+dE
+λ
+ A λ =q.T
+q  =T
+dp
+dE (A λ)  .T T
+dp
+dE
+(A λ) =T T λ A,T
+q  =T
+dp
+dE λ A  .T
+dp
+dE
+A  =dp
+dE
+ −dp
+db
+ 
+E.dp
+dA
+
+===== PAGE 49 =====
+So
+If the source is design-independent,
+then
+This is the adjoint-gradient formula in derivative form.
+4. Use reciprocity
+For a reciprocal Maxwell operator,
+Therefore the adjoint equation
+becomes
+So the adjoint field is found by solving the same Maxwell system as the forward problem,
+but with a different source.
+Since the physical Maxwell equation is
+the adjoint equation
+corresponds to an adjoint current source
+q  =T
+dp
+dE λ  −  E .T (dp
+db
+dp
+dA )
+  = 2 Re λ  −λ  E +    .dp
+dF [ T
+dp
+db T
+dp
+dA ] ∂p
+∂F
+E
+ =dp
+db 0,
+  = −2 Re λ  E +    .dp
+dF [ T
+dp
+dA ] ∂p
+∂F
+E
+ A =A.T
+A λ =T q
+ Aλ =q.
+AE =iωJ,
+Aλ =q
+
+===== PAGE 50 =====
+5. Permittivity-only design
+Now assume  only changes the permittivity.
+The Maxwell operator is
+Therefore,
+Plug this into
+Then
+So
+This is the discrete permittivity-gradient formula.
+If  is diagonal, then
+Then
+Therefore,
+ J  =  .adj iω
+q
+p
+A(p) =C M  C −T
+μ−1 ω M  (p).2
+ε
+  = −ω  .dp
+dA 2
+dp
+dM
+ 
+ε
+ =dp
+dF −2 Re λ  E .[ T
+dp
+dA ]
+ =dp
+dF −2 Re λ −ω  E .[ T ( 2
+dp
+dM  
+ε ) ]
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+M  
+ε
+M  =ε diag(ε  ,ε  , … ,ε  ).1 2 N
+ =dp
+dM  
+ε diag  ,  , … ,  .(dp
+dε  
+1
+dp
+dε  
+2
+dp
+dε  
+N )
+λ  E =T
+dp
+dM  
+ε
+ λ  E   .
+i
+∑ i i
+dp
+dε  
+i
+
+===== PAGE 51 =====
+So
+For an individual design variable ,
+If  only controls one grid cell , then
+Possibly with grid-volume factors depending on the discretization.
+6. Continuum version
+The electric-field Maxwell equation is
+with
+Differentiate with respect to :
+So
+For permittivity-only design,
+Therefore,
+  = 2ω Re  λ  E  .dp
+dF 2 [
+i
+∑ i i
+dp
+dεi ]
+p  
+j
+  = 2ω Re  λ  E   .∂p  
+j
+∂F 2 [
+i
+∑ i i
+∂p  
+j
+∂ε  
+i ]
+p  
+j j
+  
+= 2ω Re λ
+ 
+E
+  
+.∂p  
+j
+∂F 2 [ j j ∂p  
+j
+∂ε
+ 
+j
+]
+A(p)E =iωJ,
+ A(p) = ∇ ×μ ∇ × −ω ε(r,p).−1 2
+p
+ E +dp
+dA A  =dp
+dE 0.
+ A  = −  E.dp
+dE
+dp
+dA
+ =dp
+dA −ω  .2
+∂p
+∂ε
+
+===== PAGE 52 =====
+The objective derivative is
+Define the adjoint field by
+For a reciprocal material,
+so
+Then
+Using
+we get
+That is the continuum derivative formula.
+7. Multiple design variables
+If the design is described by variables
+then the forward solve is still done once:
+A  =dp
+dE ω
+ 
+E.2
+∂p
+∂ε
+ =dp
+dF 2 Re q(r) ⋅∫  (r)dV .dp
+dE
+ A λ =q.T
+A =T A,
+ Aλ =q.
+ =dp
+dF −2 Re λ(r) ⋅∫  E(r)dV .dp
+dA
+ =dp
+dA −ω  ,2
+∂p
+∂ε
+  
+= 2ω Re λ(r) ⋅E(r)
+ 
+dV .dp
+dF 2 ∫ ∂p
+∂ε(r,p)
+p  ,p  , … ,p  ,1 2 N
+ AE =b.
+
+===== PAGE 53 =====
+The adjoint solve is still done once per objective:
+For reciprocal systems:
+Then every gradient component is computed by
+For permittivity-only design,
+In continuum form,
+This is the main computational advantage:
+8. Example: field-intensity objective
+Suppose
+Define
+Then
+Differentiate with respect to :
+ A λ =q.T
+ Aλ =q.
+  = −2 Re λ  E +    .∂p  
+j
+∂F [ T
+∂p  
+j
+∂A ] ∂p  
+j
+∂F
+E
+  = 2ω Re λ  E +    .∂p  
+j
+∂F 2 [ T
+∂p  
+j
+∂M
+ 
+ε ] ∂p  
+j
+∂F
+E
+  = 2ω Re λ(r) ⋅E(r)  dV +    .∂p
+ 
+j
+∂F 2 ∫ ∂p
+ 
+j
+∂ε(r)
+∂p
+ 
+j
+∂F
+E
+ one forward solve + one adjoint solve gives all   .∂p  
+j
+∂F
+F = ∣ ⋅e^ E(r  )∣ .0
+2
+s = ⋅e^ E(r  ).0
+F =s s.∗
+p
+
+===== PAGE 54 =====
+Since
+we have
+So the adjoint source vector is
+The adjoint equation is
+Then the gradient is
+9. Example: mode-overlap objective
+Suppose
+where  represents the target mode profile at an output monitor.
+Let
+Then
+Because
+ =dp
+dF s
+ +∗
+dp
+ds s  .dp
+ds∗
+ =dp
+ds ⋅e^  (r  ),dp
+dE
+0
+ =dp
+dF 2 Re s ⋅  (r  ) .[ ∗e^ dp
+dE
+0 ]
+ q(r) =s δ(r − r  ).∗e^ 0
+ Aλ =q.
+  = 2ω Re λ(r) ⋅E(r)  dV .dp
+dF 2 ∫ ∂p
+∂ε(r,p)
+a =m E,T
+m
+F = ∣a∣ .2
+ =dp
+dF a  +∗
+dp
+da a  .dp
+da∗
+ =dp
+da m  ,T
+dp
+dE
+
+===== PAGE 55 =====
+we get
+Therefore,
+The adjoint equation is
+Then
+10. Final derivative-form summary
+Forward solve:
+Differentiate:
+Objective derivative:
+Adjoint equation:
+Using the differentiated forward equation:
+If the source is fixed:
+ =dp
+dF 2 Re a m  .[ ∗ T
+dp
+dE ]
+ q =a m.∗
+ 
+Aλ =a m.∗
+  = 2ω Re λ(r) ⋅E(r)  dV .∂p
+ 
+j
+∂F 2 ∫ ∂pj
+∂ε(r)
+ A(p)E(p) =b(p).
+ A  =  −  E.∂p
+ 
+j
+∂E
+∂p
+ 
+j
+∂b
+∂p
+ 
+j
+∂A
+  = 2 Re q  +    .∂p  
+j
+∂F [ T
+∂p  
+j
+∂E ] ∂p  
+j
+∂F
+E
+ A λ =q.T
+  = 2 Re λ  −λ  E +    .∂p  
+j
+∂F [ T
+∂p  
+j
+∂b T
+∂p  
+j
+∂A ] ∂p  
+j
+∂F
+E
+
+===== PAGE 56 =====
+For reciprocal Maxwell systems:
+so
+For permittivity-only design:
+Thus
+In continuum form:
+That is the adjoint method entirely in derivative notation.
+  
+= −2 Re λ
+ 
+E +
+   
+.∂p  
+j
+∂F [ T
+∂p  
+j
+∂A ] ∂p  
+j
+∂F
+E
+ A =A,T
+ Aλ =q.
+  = −ω  .∂p
+ 
+j
+∂A 2
+∂p
+ 
+j
+∂M  
+ε
+  = 2ω Re λ  E +    .∂p
+ 
+j
+∂F 2 [ T
+∂p
+ 
+j
+∂M  
+ε ] ∂p
+ 
+j
+∂F
+E
+  = 2ω Re λ(r) ⋅E(r)  dV +    .∂p  
+j
+∂F 2 ∫ ∂p  
+j
+∂ε(r)
+∂p  
+j
+∂F
+E
+The term ∂F∂p ∣ E\\frac{\\partial F}{\\partial p}\\bigg|\_{E}∂p∂F  E means the **direct**
+dependence of FFF on ppp, holding the field fixed. In many photonic inverse-design problems
+this term is zero.
+why this is true
+Thought for 12s
+Because  may depend on  in two different ways.
+Suppose
+Then  affects  through:
+F p
+F =F(E(p),p).
+p F
+
+===== PAGE 57 =====
+1. the field changing:
+2. possible explicit appearance of  inside the definition of .
+So by the chain rule,
+In our notation,
+The term
+means:
+If yes, this term is nonzero. If no, this term is zero.
+Example where the direct term is zero
+Suppose the objective is output intensity:
+Here  is a fixed monitor/mode vector.
+There is no explicit  in the formula. The only -dependence is through .
+So if we hold  fixed,
+does not change when  changes.
+Therefore,
+p →A(p) →E(p) →F,
+p F
+  
+= field-mediated part + direct part.dp
+dF
+  = 2 Re q  +    .dp
+dF [ T
+dp
+dE ] ∂p
+∂F
+E
+   
+∂p
+∂F
+E
+change , but artificially keep  fixed. Does  still change?p E F
+F = ∣m E(p)∣ .T 2
+m
+p p E(p)
+E
+F = ∣m E∣T 2
+p
+
+===== PAGE 58 =====
+But the total derivative is still not zero, because  changes with :
+So the design affects the objective only indirectly through the electromagnetic field.
+This is the most common case in photonic inverse design:
+These usually depend on  only through the field solution.
+Example where the direct term is not zero
+Suppose you add a volume penalty:
+Now even if  is held fixed, changing  changes the second term.
+So
+The full derivative becomes
+Another example:
+Even if  is fixed, changing  changes . Therefore,
+    
+= 0.∂p
+∂F
+E
+E p
+ =dp
+dF 2 Re q  .[ T
+dp
+dE ]
+F = transmission, reflection, mode overlap, field intensity, focusing efficiency, 
+p
+F = ∣m E(p)∣ −T 2 α  p  .
+i
+∑ i
+E p  
+i
+    = −α.∂p  
+i
+∂F
+E
+ =dp  
+i
+dF 2 Re q  −[ T
+∂p  
+i
+∂E ] α.
+F = ε(p)∣E∣ dV .∫ 2
+E p ε(p)
+    = 0.∂p
+∂F
+E
+
+
+===== PAGE 59 =====
+So why is it often zero?
+Because many photonic design objectives are defined as functions of the solved field only:
+For example:
+In these cases,  changes the material distribution, which changes , which changes
+. But once  is fixed, the objective formula itself has no remaining -dependence.
+Therefore,
+for many standard inverse-design objectives.
+The adjoint gradient then reduces to
+For permittivity-only design,
+so
+F =F(E(p)).
+F = ∣E  (r  )∣ ,z 0
+2
+F = ∣m E∣ ,T 2
+F = power through output port,
+F = coupling efficiency into target mode.
+p A(p)
+E(p) E p
+    = 0∂p
+∂F
+E
+  = −2 Re λ  E .dp
+dF [ T
+dp
+dA ]
+ =dp
+dA −ω
+ ,2
+dp
+dM  
+ε
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+I don;t want to write it in terms of q, write the q out
+
+===== PAGE 60 =====
+Thought for 9s
+Yes. Instead of writing
+we should write the adjoint source explicitly from the objective.
+For a general real objective
+the field-dependent derivative is
+So what I previously called  is
+Therefore the adjoint equation should be written as
+For reciprocal Maxwell,
+so
+Then the gradient is
+If the source is fixed,
+ =dp
+dF 2 Re q  ,[ T
+dp
+dE ]
+F =F(E,E ,p),∗
+  = 2 Re   +    .dp
+dF [(∂E
+∂F )
+T
+dp
+dE ] ∂p
+∂F
+E
+q
+ q =  .∂E
+∂F
+ A λ =  .T
+∂E
+∂F
+A =T A,
+ Aλ =  .∂E
+∂F
+  = 2 Re λ  −λ  E +    .dp
+dF [ T
+dp
+db T
+dp
+dA ] ∂p
+∂F
+E
+ =dp
+db 0,
+
+===== PAGE 61 =====
+so
+For permittivity-only design,
+so
+Therefore,
+Example 1: field intensity objective
+Suppose
+Define
+Then
+Differentiate:
+Since
+we get
+  
+= −2 Re λ
+ 
+E +
+   
+.dp
+dF [ T
+dp
+dA ] ∂p
+∂F
+E
+A =C M  C −T
+μ−1 ω M  ,2
+ε
+ =dp
+dA −ω
+ .2
+dp
+dM
+ 
+ε
+  = 2ω Re λ  E +    .dp
+dF 2 [ T
+dp
+dM  
+ε ] ∂p
+∂F
+E
+F = ∣ ⋅e^ E(r  )∣ .0
+2
+s = ⋅e^ E(r  ).0
+F =s s.∗
+ =dp
+dF s  +∗
+dp
+ds s  .dp
+ds∗
+ =dp
+ds ⋅e^  (r  ),dp
+dE
+0
+ =dp
+dF 2 Re s ⋅  (r  ) .[ ∗e^ dp
+dE
+0 ]
+
+===== PAGE 62 =====
+So
+Therefore the adjoint equation is
+Since the physical source form is
+the adjoint current source is
+Then
+Example 2: mode-overlap objective
+Suppose
+and
+Then
+Differentiate:
+Since
+  =s δ(r − r  ).∂E
+∂F ∗e^ 0
+ Aλ =s δ(r − r  ).∗e^ 0
+AE =iωJ,
+ J  =  δ(r − r  ).adj iω
+s∗
+e^ 0
+  = 2ω Re λ(r) ⋅E(r)  dV .dp
+dF 2 ∫ ∂p
+∂ε(r)
+a =m E,T
+F = ∣a∣ .2
+F =a a.∗
+ =dp
+dF a  +∗
+dp
+da a  .dp
+da∗
+ =dp
+da m
+ ,T
+dp
+dE
+
+===== PAGE 63 =====
+we get
+Therefore,
+So the adjoint equation is
+And the adjoint current source is
+Then the gradient is
+Or in continuum form,
+So the no-  version is:
+and for the common mode-overlap objective,
+Then
+ =dp
+dF 2 Re a m  .[ ∗ T
+dp
+dE ]
+  
+=a m.∂E
+∂F ∗
+ Aλ =a m.∗
+ J  =  .adj iω
+a m∗
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+  
+= 2ω Re λ(r) ⋅E(r)
+ 
+dV .dp
+dF 2 ∫ ∂p
+∂ε(r)
+q
+ 
+Aλ =
+ 
+∂E
+∂F
+ Aλ =a m, a =m E.∗ T
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+
+===== PAGE 64 =====
+Then the gradient is dFdp\=2Re \[λTdbdp−λTdAdpE\]+∂F∂p ∣ E.\\boxed{ \\frac{dF}{dp} =
+2\\operatorname{Re} \\left\[ \\lambda^T\\frac{db}{dp} - \\lambda^T\\frac{dA}{dp}E \\right\] +
+\\frac{\\partial F}{\\partial p}\\bigg|\_E. }dpdF \=2Re\[λTdpdb −λTdpdA E\]+∂p∂F  E . 
+how we got here
+Thought for 17s
+The formula comes from replacing the unknown field derivative  using the differentiated
+Maxwell equation. I’ll write the missing algebra explicitly, with  shown instead of hiding
+it inside a symbol.
+ 
+dp
+dE
+ 
+∂E
+∂F
+Start from the two equations:
+and
+We want
+1. Differentiate the Maxwell equation
+Start with
+Differentiate with respect to :
+Using the product rule:
+Move the first term to the right side:
+ 
+A(p)E(p) =b(p)
+ F =F(E(p),p) ∈ R.
+ .dp
+dF
+A(p)E(p) =b(p).
+p
+ A(p)E(p) =dp
+d [ ]  .dp
+db
+ E +dp
+dA A  =dp
+dE
+ .dp
+db
+
+===== PAGE 65 =====
+This is the key equation for the field derivative.
+2. Differentiate the objective
+For a real objective , the derivative can be written as
+Here
+is a column vector with the same size as .
+The direct term
+means: change , but hold  fixed.
+For many objectives, like
+this direct term is zero because  depends on  only through .
+3. Define the adjoint field
+Define  by
+For reciprocal Maxwell systems,
+so this becomes
+ A  =  −  E.dp
+dE
+dp
+db
+dp
+dA
+F(E,p)
+  = 2 Re   +    .dp
+dF [(∂E
+∂F )
+T
+dp
+dE ] ∂p
+∂F
+E
+ 
+∂E
+∂F
+E
+   
+∂p
+∂F
+E
+p E
+F = ∣m E∣ ,T 2
+F p E(p)
+λ
+ A λ =  .T
+∂E
+∂F
+A =T A,
+
+===== PAGE 66 =====
+Now use the adjoint equation inside the objective derivative.
+We have
+Since
+we get
+4. Substitute the differentiated Maxwell equation
+From step 1:
+Substitute this into
+Then
+Distribute :
+Therefore,
+Now put that back into the objective derivative:
+ Aλ =  .∂E
+∂F
+  =(∂E
+∂F )
+T
+dp
+dE (A λ)  .T T
+dp
+dE
+(A λ) =T T λ A,T
+   
+=λ A
+ 
+.(∂E
+∂F )
+T
+dp
+dE T
+dp
+dE
+A  =dp
+dE
+ −dp
+db
+ E.dp
+dA
+λ A  .T
+dp
+dE
+λ A  =T
+dp
+dE λ  −  E .T (dp
+db
+dp
+dA )
+λT
+λ A  =T
+dp
+dE λ  −T
+dp
+db λ  E.T
+dp
+dA
+  =(∂E
+∂F )
+T
+dp
+dE λ −T
+dp
+db λ
+ 
+E.T
+dp
+dA
+
+===== PAGE 67 =====
+So we get
+That is exactly where the formula comes from.
+5. If the source is fixed
+Usually the current source is not design-dependent, so
+and
+Then the formula reduces to
+If the objective has no direct dependence on , then
+so
+6. For permittivity-only design
+The Maxwell operator is
+If only  depends on ,
+ =dp
+dF 2 Re   +[(∂E
+∂F )
+T
+dp
+dE ]    .∂p
+∂F
+E
+  = 2 Re λ  −λ  E +    .dp
+dF [ T
+dp
+db T
+dp
+dA ] ∂p
+∂F
+E
+b =iωJ,
+ =dp
+db 0.
+  = −2 Re λ  E +    .dp
+dF [ T
+dp
+dA ] ∂p
+∂F
+E
+p
+   =∂p
+∂F
+E
+0,
+  = −2 Re λ  E .dp
+dF [ T
+dp
+dA ]
+A =C M
+ 
+C −T
+μ−1 ω M
+ 
+.2 ε
+ε p
+
+===== PAGE 68 =====
+Substitute into
+Then
+So
+That is the usual adjoint gradient formula.
+The whole trick is this substitution:
+This removes the need to compute  directly.
+ =dp
+dA −ω
+ .2
+dp
+dM  
+ε
+ =dp
+dF −2 Re λ
+ 
+E .[ T
+dp
+dA ]
+ =dp
+dF −2 Re λ −ω  E .[ T ( 2
+dp
+dM  
+ε ) ]
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+   ⟶ λ A  ⟶ λ  −  E .(∂E
+∂F )
+T
+dp
+dE T
+dp
+dE T (dp
+db
+dp
+dA )
+ 
+dp
+dE
+ok, how to calculate lambda
+Stopped thinking
+The computation is very concrete: first do the forward solve to get , then differentiate the
+objective with respect to , then solve one more Maxwell equation with that derivative as
+the source.
+E
+E
+wait, so lambda is the field generated by the source of 
+dF/dE
+Thought for 9s
+Yes — that is the right intuition.
+
+===== PAGE 69 =====
+In the reciprocal adjoint method,
+More precisely, starting from
+the adjoint field satisfies
+If the Maxwell system is reciprocal,
+so
+Therefore  is obtained by running another Maxwell simulation with source
+But remember the physical Maxwell source convention:
+So if the adjoint equation is
+then the actual adjoint current source is
+So yes:
+ λ is the field generated by an adjoint source proportional to   .∂E
+∂F
+AE =b,
+ A λ =  .T
+∂E
+∂F
+A =T A,
+ Aλ =  .∂E
+∂F
+λ
+  .∂E
+∂F
+AE =iωJ.
+Aλ =
+ ,∂E
+∂F
+ J  =   .adj iω
+1
+∂E
+∂F
+ λ = field generated by the source J  =   .adj iω
+1
+∂E
+∂F
+
+===== PAGE 70 =====
+For example, suppose
+where  is an output mode profile.
+Define
+Then
+Differentiate:
+So the field derivative coefficient is
+Therefore the adjoint field solves
+Equivalently, the physical adjoint current is
+So for a mode-overlap objective:
+The source amplitude is weighted by the conjugate of the forward overlap:
+For a point-intensity objective,
+F = ∣m E∣ ,T 2
+m
+a =m E.T
+F =a a.∗
+ =dp
+dF 2 Re a m  .[ ∗ T
+dp
+dE ]
+  =a m.∂E
+∂F ∗
+ Aλ =a m.∗
+ J  =  .adj
+iω
+a m∗
+λ = the field generated by injecting the target mode backward from the outpu
+ a .∗
+F = ∣ ⋅e^ E(r  )∣ ,0
+2
+
+===== PAGE 71 =====
+define
+Then
+So
+The adjoint source is a point source at the measurement location , polarized along ,
+with amplitude proportional to .
+So the practical recipe is:
+For permittivity design,
+So yes:  is the adjoint field generated by the objective-derivative source.
+s = ⋅e^ E(r  ).0
+  =s δ(r − r  ).∂E
+∂F ∗e^ 0
+ Aλ =s δ(r − r  ).∗e^ 0
+r  
+0 e^
+s∗
+ Forward source →E
+ Compute   
+∂E
+∂F
+ 
+Use 
+ 
+ as the adjoint source →λ∂E
+∂F
+  = −2 Re λ  E .dp
+dF [ T
+dp
+dA ]
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+λ
+then why dF/dE is usually only non zero in the monitor 
+region
+Thought for 12s
+Because
+
+===== PAGE 72 =====
+means:
+Most photonic objectives only measure the field at a monitor, so  directly depends only
+on the field values there.
+It does not mean that only the monitor region affects the objective. The design region still
+affects , but indirectly through Maxwell’s equation.
+Suppose the full field vector is
+If the objective is output power or mode overlap at a monitor, then usually
+It does not directly use  or . Therefore,
+but
+So the adjoint source is only nonzero at the monitor.
+For example, take a mode-overlap objective:
+ 
+∂E
+∂F
+Which field components does the objective  directly look at?F
+F
+F
+E =    .
+E
+ 
+design
+E  
+monitor
+E  
+other
+F =F(E  ).monitor
+E  
+design E  
+other
+ =∂E  
+design
+∂F 0,
+ =∂E
+ 
+other
+∂F 0,
+ =∂E  
+monitor
+∂F
+ 0.
+a =m E,T
+F = ∣a∣ .2
+
+===== PAGE 73 =====
+Here  is the target mode profile. It is only defined on the output monitor, so as a full
+vector it looks like
+Then
+only uses the monitor field.
+Now differentiate:
+So
+But since  is zero outside the monitor,
+That is why the adjoint source is placed at the monitor.
+The important part is this:
+is local to the monitor, but after solving
+the adjoint field  propagates backward through the whole structure.
+So even though the source is only at the monitor, the adjoint field is generally nonzero
+throughout the device.
+Then the design gradient is computed in the design region:
+m
+m =    .
+0
+m  
+monitor
+0
+a =m ET
+ =dp
+dF 2 Re a m  .[ ∗ T
+dp
+dE ]
+  =a m.∂E
+∂F ∗
+m
+   is also zero outside the monitor.∂E
+∂F
+ 
+∂E
+∂F
+Aλ =  ,∂E
+∂F
+λ
+
+===== PAGE 74 =====
+So the logic is:
+Physically:
+So yes,  is usually only nonzero in the monitor region because the objective directly
+samples the field only there. The rest of the structure affects  indirectly through the
+Maxwell solution, and that indirect dependence is captured by the adjoint field .
+  = 2ω Re  λ(r) ⋅E(r)  dV .∂p
+∂F 2 ∫
+design region ∂p
+∂ε(r)
+ F is measured at monitor ⇒   is nonzero at monitor∂E
+∂F
+   launches adjoint field ⇒λ propagates through device∂E
+∂F
+ E ×λ in design region gives gradient
+The adjoint source is placed where the objective is measured, and the resulting adjoint
+field tells you how changes in every design pixel affect that measured objective.
+ 
+∂E
+∂F
+F
+λ
+ok, how to calculate the dF/dE from forward field then
+Thought for 8s
+You calculate
+by differentiating the objective with respect to the forward field values that appear in the
+monitor formula.
+The rule is:
+So  is the vector that multiplies  inside that expression.
+ 
+∂E
+∂F
+ dF = 2 Re  dE[(∂E
+∂F )
+T
+]
+ 
+∂E
+∂F dE
+
+===== PAGE 75 =====
+1. General recipe
+Suppose after the forward simulation you know . Your objective is some real number:
+To find the adjoint source:
+1. Write the small change .
+2. Rewrite it in the form
+3. That “something” is
+Then the adjoint solve is
+for reciprocal Maxwell systems.
+2. Example: point intensity
+Suppose the objective is
+Let
+Then
+Differentiate:
+Because
+we can write
+E
+F =F(E,E ).∗
+dF
+dF = 2 Re (something) dE .[ T ]
+  .∂E
+∂F
+ Aλ =  
+∂E
+∂F
+F = ∣E  (r  )∣ .z 0
+2
+s =E  (r  ).z 0
+F =s s.∗
+dF =s ds +∗ sds .∗
+sds =∗ (s ds) ,∗ ∗
+
+===== PAGE 76 =====
+But
+Therefore,
+So
+Since
+this is
+So the adjoint source is a point source at , polarized in , with amplitude proportional to
+the complex conjugate of the forward field at that point.
+3. Example: projected field intensity
+Suppose
+Define
+Then
+Same logic:
+And
+dF = 2 Re s ds .[ ∗ ]
+ds =dE  (r  ).z 0
+dF = 2 Re s dE  (r  ) .[ ∗
+z 0 ]
+  =s δ(r − r  ).∂E
+∂F ∗z^ 0
+s =E
+ 
+(r
+ 
+),z 0
+  =E  (r  ) δ(r − r  ).∂E
+∂F
+z
+∗
+0 z^ 0
+r  
+0 z
+F = ∣ ⋅e^ E(r  )∣ .0
+2
+s = ⋅e^ E(r  ).0
+F =s s.∗
+dF = 2 Re s ds .[ ∗ ]
+
+===== PAGE 77 =====
+Therefore,
+So
+where
+4. Example: mode-overlap objective
+This is the most common case in inverse design.
+Suppose the output mode amplitude is
+where  is the target-mode monitor vector. The objective is
+After the forward simulation, calculate
+Then
+Differentiate:
+Since
+we get
+ds = ⋅e^ dE(r  ).0
+dF = 2 Re s ⋅dE(r  ) .[ ∗e^ 0 ]
+  
+=s δ(r − r
+ 
+).∂E
+∂F ∗e^ 0
+s = ⋅e^ E(r  ).0
+a =m E,T
+m
+F = ∣a∣ .2
+ a =m E.T
+F =a a.∗
+dF =a da +∗ ada .∗
+da =m dE,T
+dF =a m dE +∗ T am dE .∗T ∗
+
+===== PAGE 78 =====
+The second term is the complex conjugate of the first term, so
+Therefore,
+So the adjoint equation is
+The physical adjoint current source is
+Interpretation:
+5. Example: maximize real part of an overlap
+Suppose instead
+Let
+Then
+Differentiate:
+To match
+we need
+dF = 2 Re a m dE .[ ∗ T ]
+  
+=a m.∂E
+∂F ∗
+ Aλ =a m.∗
+ J  =  .adj iω
+a m∗
+ 
+Inject the target mode backward from the monitor with amplitude a .∗
+F = Re(m E).T
+a =m E.T
+F = Re(a).
+dF = Re(da) = Re(m dE).T
+dF = 2 Re
+ 
+dE ,[(∂E
+∂F )
+T
+]
+
+===== PAGE 79 =====
+The factor  appears because our convention has a .
+6. Example: weighted intensity over a monitor
+Suppose
+Then
+Differentiate:
+So
+Therefore,
+on the monitor, and zero elsewhere.
+So the adjoint source distribution is proportional to the conjugated forward field on the
+monitor.
+7. The key pattern
+For objectives of the form
+where
+  =  m.∂E
+∂F
+2
+1
+1/2 2 Re[⋯ ]
+F =  w(r)∣E  (r)∣ dS.∫
+monitor
+z
+2
+F =  wE  E  dS.∫
+monitor
+z
+∗
+z
+dF =  w E  dE  +E  dE  dS.∫
+monitor
+[ z
+∗
+z z z
+∗]
+dF = 2 Re  wE  dE  dS.∫
+monitor
+z
+∗
+z
+  =w(r)E  (r)∂E
+∂F
+z
+∗ z^
+F = ∣a∣ ,2
+
+===== PAGE 80 =====
+the adjoint source is
+So you calculate it from the forward field by:
+That is why the adjoint source amplitude contains the complex conjugate of the forward
+overlap.
+8. Then calculate 
+Once you have
+solve
+for reciprocal Maxwell.
+Equivalently, in Maxwell-current notation,
+so
+Then the gradient is
+For permittivity design,
+a =m E,T
+  
+=a m.∂E
+∂F ∗
+ E ⟶a =m E ⟶a m.T ∗
+λ
+ ,∂E
+∂F
+ Aλ =  
+∂E
+∂F
+Aλ =iωJ  ,adj
+ J  =   .adj iω
+1
+∂E
+∂F
+  
+= −2 Re λ
+ 
+E .dp
+dF [ T
+dp
+dA ]
+
+===== PAGE 81 =====
+So the practical workflow is:
+  
+= 2ω Re λ
+ 
+E .dp
+dF 2 [ T
+dp
+dM
+ 
+ε
+]
+ 
+Forward solve AE =b
+ Compute objective F
+ 
+Differentiate F with respect to the monitor field E
+ Use that derivative as the adjoint source
+ Solve Aλ =  
+∂E
+∂F
+ Use Eλ overlap in the design region for the gradient
+wait, that should be a analytic differentiation as FoM is 
+usually written in the terms of E
+Thought for 19s
+Yes — you do not estimate  by finite differences over pixels. You take the FoM
+formula, written in terms of the monitor field , and differentiate it analytically.
+∂F/∂E
+E
+Yes. Exactly.
+You calculate
+by analytically differentiating the FoM formula with respect to the forward field.
+But because  is complex and  is real, the correct language is usually Wirtinger
+differentiation, where  and  are treated as independent variables.
+1. Important correction: not “complex analytic” derivative
+Most FoMs are things like
+ 
+∂E
+∂F
+E F
+E E∗
+
+===== PAGE 82 =====
+or
+These depend on both  and . For example,
+So  is not analytic/holomorphic as a complex function of . Instead, we use
+Then
+For real , this can be written as
+That is the convention we are using.
+So yes, you analytically differentiate the FoM, but you differentiate it as a real function of
+complex variables.
+2. Example: point intensity
+Suppose
+Let
+Then
+Differentiate:
+F = ∣m E∣T 2
+F = ∣E  (r  )∣ .z 0
+2
+E E∗
+∣E∣ =2 E E.∗
+F E
+F =F(E,E ).∗
+dF =  dE +(∂E
+∂F )
+T
+dE .(∂E∗
+∂F )
+T
+∗
+F
+ dF = 2 Re  dE .[(∂E
+∂F )
+T
+]
+F = ∣E  (r  )∣ .z 0
+2
+s =E  (r  ).z 0
+F =s s.∗
+dF =s ds +∗ sds .∗
+
+===== PAGE 83 =====
+Since the second term is the complex conjugate of the first,
+Because
+we get
+Therefore,
+So the adjoint source is a point source at the monitor location with amplitude equal to the
+conjugated forward field there.
+3. Example: mode-overlap efficiency
+Suppose
+and
+Here  is the target-mode monitor profile.
+Differentiate:
+So
+But
+Therefore,
+dF = 2 Re s ds .[ ∗ ]
+ds =dE  (r  ),z 0
+dF = 2 Re E  (r  )dE  (r  ) .[ z
+∗
+0 z 0 ]
+  =E  (r  ) δ(r − r  ).∂E
+∂F
+z
+∗
+0 z^ 0
+a =m ET
+F = ∣a∣ .2
+m
+F =a a.∗
+dF =a da +∗ ada .∗
+da =m dE.T
+dF =a m dE +∗ T am dE .∗T ∗
+
+===== PAGE 84 =====
+So
+Comparing with
+we get
+where
+So the adjoint equation is
+Physically:
+4. General monitor formula
+Suppose the monitor extracts some field vector
+where  maps the full simulation field to the monitor degrees of freedom.
+If the FoM is
+then first calculate
+analytically from the FoM formula.
+Then use the chain rule:
+dF = 2 Re a m dE .[ ∗ T ]
+dF = 2 Re  dE ,[(∂E
+∂F )
+T
+]
+  =a m.∂E
+∂F ∗
+ a =m E.T
+ Aλ =a m.∗
+λ = field generated by injecting the target mode backward with amplitude a∗
+y =ME,
+M
+F =F(y,y ),∗
+ 
+∂y
+∂F
+
+===== PAGE 85 =====
+That is why  is usually nonzero only on the monitor:  places the derivative
+back onto the monitor grid points and leaves the rest zero.
+5. Practical recipe
+Forward solve:
+Compute the FoM from the forward field:
+Analytically differentiate the FoM:
+such that
+Then solve the adjoint equation:
+For reciprocal Maxwell:
+Then for permittivity design:
+So yes:  is obtained by analytic differentiation of the FoM expression written in
+terms of the forward field, but because the field is complex, it is really a Wirtinger-style
+derivative, not an ordinary holomorphic complex derivative.
+  =M  .∂E
+∂F T
+∂y
+∂F
+∂F/∂E MT
+AE =b.
+F =F(E,E ).∗
+  
+∂E
+∂F
+ dF = 2 Re  dE .[(∂E
+∂F )
+T
+]
+ A λ =  .T
+∂E
+∂F
+ Aλ =  .∂E
+∂F
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+∂F/∂E
+
+===== PAGE 86 =====
+give me the adjoint source definition in latex
+Thought for 4s
+Here is the adjoint-source definition in LaTeX:
+The adjoint source vector is defined as
+The adjoint field satisfies
+For a reciprocal Maxwell operator,
+\[
+dF
+=
+2\operatorname{Re}
+\left[
+\left(\frac{\partial F}{\partial E}\right)^T dE
+\right]
++
+\left.\frac{\partial F}{\partial p}\right|_{E} dp .
+\]
+\[
+b_{\mathrm{adj}}
+\equiv
+\frac{\partial F}{\partial E}.
+\]
+\[
+A^T \lambda = b_{\mathrm{adj}}
+=
+\frac{\partial F}{\partial E}.
+\]
+\[
+A^T = A,
+LaTeX
+LaTeX
+LaTeX
+LaTeX
+
+===== PAGE 87 =====
+so
+Since the physical Maxwell equation is written as
+the physical adjoint current source is
+So the compact definition is
+with
+\]
+\[
+A\lambda
+=
+\frac{\partial F}{\partial E}.
+\]
+\[
+AE = i\omega J,
+\]
+\[
+J_{\mathrm{adj}}
+=
+\frac{1}{i\omega}
+\frac{\partial F}{\partial E}.
+\]
+\[
+\boxed{
+J_{\mathrm{adj}}
+=
+\frac{1}{i\omega}
+\frac{\partial F}{\partial E}
+}
+\]
+LaTeX
+LaTeX
+LaTeX
+LaTeX
+LaTeX
+
+===== PAGE 88 =====
+defining what  means.
+\[
+\boxed{
+dF
+=
+2\operatorname{Re}
+\left[
+\left(\frac{\partial F}{\partial E}\right)^T dE
+\right]
+}
+\]
+∂F/∂E
+for a random dM/dp, as long as it is reciprocal, this still 
+holds right? even for nonlinear material
+Thought for 18s
+For the linear case, the gradient formula is more general than the reciprocity assumption.
+Reciprocity only lets you replace the adjoint operator  by the same forward operator ;
+the actual material derivative  can be any correct derivative of the system you are
+perturbing.
+AT A
+∂A/∂p
+For a linear Maxwell system:
+yes, the adjoint formula holds for any correct
+The formula is
+where
+If the system is reciprocal,
+A(p)E(p) =b,
+ .∂p
+∂A
+  = −2 Re λ  E +    
+∂p
+∂F [ T
+∂p
+∂A ] ∂p
+∂F
+E
+ A λ =  .T
+∂E
+∂F
+ A =A,T
+
+===== PAGE 89 =====
+so the adjoint solve becomes
+The reciprocity condition is needed for the adjoint solve, not for the algebraic gradient
+expression itself.
+For linear permittivity design,
+so
+If only  changes,
+Therefore,
+If
+is diagonal or symmetric, then it corresponds to a reciprocal material change. If it is a
+completely random nonsymmetric matrix, the formula still works mathematically, but that
+perturbation may represent a nonreciprocal material change.
+So:
+But:
+ Aλ =  .∂E
+∂F
+A =C M  C −T
+μ−1 ω M  ,2
+ε
+ =∂p
+∂A C
+ 
+C −T
+∂p
+∂M  
+μ−1
+ω
+ .2
+∂p
+∂M  
+ε
+ε
+ =∂p
+∂A −ω  .2
+∂p
+∂M  
+ε
+  = 2ω Re λ  E .∂p
+∂F 2 [ T
+∂p
+∂M  
+ε ]
+ 
+∂p
+∂M  
+ε
+ For linear systems, the gradient formula works for any   .∂p
+∂A
+ Using the same forward Maxwell solver for the adjoint requires A =A.T
+
+===== PAGE 90 =====
+For a nonlinear material, the answer is more careful.
+You cannot generally write the problem as
+with a fixed linear operator . Instead, write a nonlinear residual equation:
+For example, in a Kerr medium,
+so the Maxwell equation depends nonlinearly on .
+Then differentiate:
+Define the Jacobian
+Then
+The adjoint equation becomes
+And the gradient is
+So for nonlinear materials, the adjoint operator is not . It is the transpose of the
+linearized nonlinear Maxwell Jacobian:
+A(p)E =b
+A
+ 
+R(E,p) = 0.
+ε(E) =ε  +L χ ∣E∣ ,(3) 2
+E
+  +∂E
+∂R
+∂p
+∂E
+ =∂p
+∂R 0.
+J =  .∂E
+∂R
+ J  = −  .∂p
+∂E
+∂p
+∂R
+ J λ =  .T
+∂E
+∂F
+  
+= −2 Re λ
+ 
++
+  
+.∂p
+∂F [ T
+∂p
+∂R] ∂p
+∂F
+E
+AT
+ J =  .T (∂E
+∂R )
+T
+
+===== PAGE 91 =====
+Therefore:
+You need the linearized Jacobian to have the appropriate transpose symmetry:
+if you want to use the same operator for the adjoint solve.
+So the compact answer is:
+ For nonlinear materials, reciprocity of the original material is not enough.
+ J =JT
+ Linear reciprocal material: yes, use Aλ =  .∂E
+∂F
+Nonlinear material: replace A by the Jacobian J =  .∂E
+∂R
+ 
+Only if J =J can the adjoint solve use the same linearized operator.T
+so I guess because of the E dependancy of the epsilon, the 
+adjoint formulation break down right?
+Thought for 21s
+It does not break the adjoint method. It breaks the simple linear formula where the same
+fixed operator  appears in both the forward and adjoint equations.A
+Not exactly.
+But the simple linear adjoint formula changes.
+For a linear material, we had
+where  depends on , but not on . Then
+ 
+The adjoint method does not break down.
+A(p)E =b,
+A p E
+A  =∂p
+∂E −  E.∂p
+∂A
+
+===== PAGE 92 =====
+The adjoint equation was
+For reciprocal linear Maxwell,
+so we can solve
+For a nonlinear material, the permittivity depends on the field:
+Then the Maxwell equation is not really
+It is a nonlinear residual equation:
+For example,
+Now differentiate with respect to :
+Define the nonlinear Jacobian
+Then
+So the adjoint equation becomes
+A λ =T
+ .∂E
+∂F
+A =T A,
+Aλ =  .∂E
+∂F
+ε =ε(E,p).
+A(p)E =b.
+ 
+R(E,p) = 0.
+R(E,p) = ∇ ×μ ∇ ×−1 E −ω ε(E,p)E −2 iωJ.
+p
+  +∂E
+∂R
+∂p
+∂E
+ =∂p
+∂R 0.
+J =  .∂E
+∂R
+ J  = −  .∂p
+∂E
+∂p
+∂R
+
+===== PAGE 93 =====
+Not
+That is the key difference.
+Because  depends on , the Jacobian contains extra terms.
+For
+the derivative with respect to  is schematically
+The extra term
+is the nonlinear correction.
+So the adjoint method still works, but the adjoint field is generated by the transpose of the
+linearized nonlinear Maxwell operator, not simply by the original forward operator.
+For Kerr nonlinearity, for example,
+Since
+ depends on both  and . Then the exact adjoint formulation must treat  and  as
+coupled variables, or equivalently split the field into real and imaginary parts.
+So the exact nonlinear adjoint equation is more like
+ J λ =  .T
+∂E
+∂F
+A λ =T
+ .∂E
+∂F
+ε E
+R(E,p) =A  E −curl ω ε(E,p)E −2 b,
+E
+ J =A  −ω ε(E,p) +E  .curl
+2 [ ∂E
+∂ε ]
+ E  
+∂E
+∂ε
+ε(E) =ε  +L χ ∣E∣ .(3) 2
+∣E∣ =2 E E,∗
+ε E E∗ E E∗
+
+===== PAGE 94 =====
+where  is the augmented Jacobian of the nonlinear Maxwell residual.
+So the correct conclusion is:
+But:
+Instead, use
+where
+is the linearized Maxwell operator around the forward nonlinear solution.
+So for nonlinear materials, the adjoint simulation is not simply “run the same Maxwell solve
+backward.” It is “solve the adjoint of the linearized nonlinear Maxwell problem.”
+ J  Λ =  ,aug
+T
+∂(E,E )∗
+∂F
+J  
+aug
+ Nonlinearity does not break the adjoint method.
+ 
+It breaks the simple A λ =
+ 
+ linear-adjoint equation.T
+∂E
+∂F
+ 
+J λ =
+ 
+,T
+∂E
+∂F
+ 
+J =
+ 
+∂E
+∂R
+but is J reciprocal? I know the operator is changed, but 
+how the adjoint source setup and how the adjoint is 
+calculated is still valid?
+Thought for 1m 18s
+The validity comes from linearizing the nonlinear Maxwell equation around the already-
+computed forward solution. The adjoint source is still the derivative of the FoM with respect
+to the state, but the operator that propagates that source is now the transpose of the
+nonlinear Jacobian.
+
+===== PAGE 95 =====
+The key point is:
+And in general:
+But the adjoint method is still valid either way.
+1. Linear case reminder
+For a linear system,
+the residual is
+The Jacobian with respect to the field is
+So the adjoint equation is
+which becomes
+If the system is reciprocal,
+so
+That is the simple linear reciprocal adjoint case.
+For nonlinear materials, the relevant reciprocity question is about J =  ,  no∂E
+∂R
+ J is not automatically reciprocal.
+A(p)E =b,
+R(E,p) =A(p)E −b = 0.
+J =  =∂E
+∂R A.
+J λ =T
+ ,∂E
+∂F
+A λ =T
+ .∂E
+∂F
+A =T A,
+Aλ =  .∂E
+∂F
+
+===== PAGE 96 =====
+2. Nonlinear case
+For nonlinear material,
+so the Maxwell equation is not really
+Instead write it as a nonlinear residual equation:
+For example,
+Now define the Jacobian
+This is the linearized Maxwell operator around the forward nonlinear solution.
+The adjoint equation is
+So the adjoint source is still
+But the operator that propagates it is now
+not necessarily the original forward Maxwell operator.
+3. Why the adjoint source setup is still valid
+Start with
+ε =ε(E,p),
+A(p)E =b.
+ 
+R(E,p) = 0.
+R(E,p) = ∇ ×μ ∇ ×−1 E −ω ε(E,p)E −2 iωJ.
+J =  .∂E
+∂R
+ J λ =  .T
+∂E
+∂F
+  .∂E
+∂F
+ J ,T
+R(E(p),p) = 0.
+
+===== PAGE 97 =====
+Differentiate with respect to :
+Using
+we get
+The objective derivative is
+Define  by
+Then
+Since
+we get
+But
+Therefore,
+p
+  +∂E
+∂R
+dp
+dE
+ =∂p
+∂R 0.
+J =  ,∂E
+∂R
+ J  = −  .dp
+dE
+∂p
+∂R
+ =dp
+dF 2 Re   +[(∂E
+∂F )
+T
+dp
+dE ]    .∂p
+∂F
+E
+λ
+ J λ =  .T
+∂E
+∂F
+  =(∂E
+∂F )
+T
+dp
+dE (J λ)  .T T
+dp
+dE
+(J λ) =T T λ J,T
+  =(∂E
+∂F )
+T
+dp
+dE λ J
+ .T
+dp
+dE
+J
+ =dp
+dE −  .∂p
+∂R
+  =(∂E
+∂F )
+T
+dp
+dE −λ  .T
+∂p
+∂R
+
+===== PAGE 98 =====
+So
+This derivation does not require  to be reciprocal.
+So:
+Reciprocity only tells you whether
+can be replaced by
+4. Is  reciprocal?
+Sometimes yes, sometimes no.
+For nonlinear systems, the question is:
+If yes, the linearized nonlinear problem is reciprocal, and the adjoint solve uses the same
+linearized operator:
+If no, then the adjoint solve must use
+So the adjoint method still works, but you cannot simply run the same linearized forward
+operator unless .
+5. Why  differs from 
+Suppose
+  
+= −2 Re λ
+ 
++
+   
+.dp
+dF [ T
+∂p
+∂R] ∂p
+∂F
+E
+J
+ 
+The adjoint method is valid because of the chain rule and transpose algebra.
+JT
+J.
+J
+ J =J?T
+ Jλ =  .∂E
+∂F
+ J λ =  .T
+∂E
+∂F
+J =T J
+J A
+
+===== PAGE 99 =====
+If  did not depend on , then
+But if
+then differentiating
+with respect to  gives two terms:
+So schematically,
+The extra term
+is what changes the adjoint operator.
+6. For Kerr nonlinearity
+Take a scalar Kerr-type material:
+Since
+the residual depends on both  and :
+So the linearized equation is not just
+R(E,p) =A  E −curl ω ε(E,p)E −2 b.
+ε E
+J =A  −curl ω ε =2 A.
+ε =ε(E,p),
+ε(E,p)E
+E
+ ε(E,p)E =∂E
+∂ [ ] ε(E,p) +E  .∂E
+∂ε
+ J =A  −ω ε(E,p) +E  .curl
+2 [ ∂E
+∂ε ]
+ E  
+∂E
+∂ε
+ε(E) =ε  +L χ ∣E∣ .(3) 2
+∣E∣ =2 E E,∗
+E E∗
+R =R(E,E ,p).∗
+
+===== PAGE 100 =====
+It has coupling between
+and
+More correctly, define the augmented state
+Then
+The augmented Jacobian is
+The adjoint equation is
+So for nonlinear complex materials, the adjoint solve may require a coupled linearized
+system, not a normal Maxwell solve with only one electric-current source.
+7. What happens to the adjoint source?
+The adjoint source is still determined by the FoM:
+If the FoM is a mode-overlap objective,
+J
+ =dp
+dE −R
+ 
+.p
+ 
+dp
+dE
+ .dp
+dE∗
+X =  .[E
+E∗]
+R(X ,p) =  =[R(E,E ,p)∗
+R (E,E ,p)∗ ∗ ] 0.
+ J =  .∂X
+∂R
+ J Λ =  .T
+∂X
+∂F
+  .∂E
+∂F
+a =m E,T
+
+===== PAGE 101 =====
+then
+That does not change.
+What changes is the operator used to compute .
+For linear reciprocal Maxwell:
+For nonlinear Maxwell:
+or, more precisely for -coupled nonlinearities,
+So the adjoint source is still placed at the monitor, because
+is still nonzero only where the FoM directly samples the field.
+But the adjoint field propagates through the linearized nonlinear medium, not the original
+nonlinear forward equation.
+8. Practical interpretation
+For nonlinear inverse design, the workflow is:
+F = ∣a∣ ,2
+  =a m.∂E
+∂F ∗
+λ
+ Aλ =a m.∗
+ J λ =a mT ∗
+E,E∗
+ 
+J Λ =
+ 
+.T
+∂X
+∂F
+ 
+∂E
+∂F
+ 1. Solve nonlinear forward problem R(E,p) = 0.
+ 2. Freeze the nonlinear material at the forward solution E.
+3. Build the linearized Jacobian J =
+ 
+.∂E
+∂R
+
+===== PAGE 102 =====
+So yes, the adjoint source setup remains valid.
+But the adjoint field is not necessarily generated by the original nonlinear Maxwell solver. It
+is generated by the transpose of the linearized nonlinear Maxwell operator.
+9. Final answer
+For a general nonlinear material, that is not guaranteed.
+But:
+You simply solve
+instead of
+The adjoint source is still
+because that comes from differentiating the FoM.
+Reciprocity only decides whether the adjoint solve can be implemented using the same
+linearized operator, or whether you must explicitly use the transpose linearized operator.
+ 4. Compute the adjoint source   .∂E
+∂F
+ 5. Solve J λ =  .T
+∂E
+∂F
+ 
+6. Compute 
+ 
+= −2 Re λ
+ 
+.dp
+dF [ T
+∂p
+∂R]
+J is reciprocal only if the linearized nonlinear Maxwell operator satisfies J =T
+ 
+The adjoint method is still valid even if J =J.T
+
+ J λ =  
+T
+∂E
+∂F
+ Jλ =  .∂E
+∂F
+  ,∂E
+∂F
+
+===== PAGE 103 =====
+what if FoM is a function of E and H
+Thought for 33s
+If  appears in the FoM, you have two equivalent choices: use a first-order  adjoint
+system, or eliminate  and convert the -derivative into an equivalent electric-field
+adjoint source. The second is usually cleaner if your forward operator is the electric-field
+wave equation.
+H (E,H)
+H H
+Then the FoM derivative has two field-derivative pieces:
+So
+Here both
+and
+are calculated analytically from the FoM formula, evaluated using the forward fields.
+If you use the -only wave equation
+The electric-field Maxwell equation is
+with
+The magnetic field is not independent. It is obtained from
+F =F(E,H,p).
+  = 2 Re   +   +    .dp
+dF [(∂E
+∂F )
+T
+dp
+dE (∂H
+∂F )
+T
+dp
+dH ] ∂p
+∂F
+E,H
+ 
+∂E
+∂F
+ 
+∂H
+∂F
+E
+A(p)E =b,
+A = ∇ ×μ ∇ ×−1 −ω ε.2
+∇ ×E =iωμH.
+
+===== PAGE 104 =====
+So
+where
+In discrete form,
+Now differentiate:
+Substitute this into the FoM derivative:
+Group the terms multiplying :
+Therefore, the effective electric adjoint source is
+So the adjoint equation becomes
+For a reciprocal linear Maxwell system,
+so
+H =BE
+ 
+B =
+ 
+μ ∇ × .iω
+1 −1
+ 
+H =BE =
+ 
+M
+ 
+CE.iω
+1
+μ−1
+ =dp
+dH B  +dp
+dE
+ E.dp
+dB
+ =dp
+dF 2 Re   +  B  +  E +[(∂E
+∂F )
+T
+dp
+dE (∂H
+∂F )
+T
+( dp
+dE
+dp
+dB )]    .∂p
+∂F
+E,H
+ 
+dp
+dE
+ =dp
+dF 2 Re  +B   +   E +[(∂E
+∂F T
+∂H
+∂F )
+T
+dp
+dE (∂H
+∂F )
+T
+dp
+dB ]   .∂p
+∂F
+E,H
+ 
+b
+ 
+=
+ 
++B
+ 
+.adj ∂E
+∂F T
+∂H
+∂F
+ 
+A λ =
+ 
++B
+ 
+.T
+∂E
+∂F T
+∂H
+∂F
+A =T A,
+ Aλ =  +B  .∂E
+∂F T
+∂H
+∂F
+
+===== PAGE 105 =====
+That is the main result.
+If  is fixed
+Usually in photonic inverse design,
+and does not depend on the design. Then
+So the FoM derivative becomes
+Then define  by
+After substituting the differentiated Maxwell equation, the gradient is
+For permittivity-only design,
+so
+So if  is fixed, the only change is the adjoint source:
+μ
+μ =μ  
+0
+ =dp
+dB 0.
+  = 2 Re  +B   .dp
+dF [(∂E
+∂F T
+∂H
+∂F )
+T
+dp
+dE ]
+λ
+ A λ =  +B  .T
+∂E
+∂F T
+∂H
+∂F
+  = −2 Re λ  E .dp
+dF [ T
+dp
+dA ]
+ =dp
+dA −ω  ,2
+dp
+dM  
+ε
+  = 2ω Re λ  E .dp
+dF 2 [ T
+dp
+dM  
+ε ]
+μ
+  ⟶  +B  .∂E
+∂F
+∂E
+∂F T
+∂H
+∂F
+
+===== PAGE 106 =====
+If  also depends on design
+Then
+The full derivative is
+The extra term appears because  depends on  directly through
+Equivalent first-order  formulation
+Instead of eliminating , you can treat
+and
+as independent state variables.
+Define
+Then Maxwell’s equations are written as a first-order residual:
+The FoM derivative is
+The adjoint equation is
+μ
+ =dp
+dB
+ 0.
+  = −2 Re λ  E + 2 Re   E +    .dp
+dF [ T
+dp
+dA ] [(∂H
+∂F )
+T
+dp
+dB ] ∂p
+∂F
+E,H
+H μ
+H =
+ 
+μ ∇ ×iω
+1 −1 E.
+(E,H)
+H
+E
+H
+x =  .[E
+H]
+R(x,p) = 0.
+  = 2 Re   +    .dp
+dF [[
+ 
+∂E
+∂F
+ 
+∂H
+∂F ]
+T
+dp
+dx ] ∂p
+∂F
+x
+
+===== PAGE 107 =====
+Then the gradient is
+This version is the most general, especially for nonlinear materials.
+Practical meaning
+If your FoM depends only on , then the adjoint source is
+If your FoM depends on both  and , then with the -only wave equation, the adjoint
+source becomes
+where
+So the -dependence does not break the adjoint method. It simply contributes an
+additional term to the adjoint source.
+  Λ =  .( ∂x
+∂R)
+T
+[
+ 
+∂E
+∂F
+ 
+∂H
+∂F ]
+  
+= −2 Re Λ
+ 
++
+   
+.dp
+dF [ T
+∂p
+∂R] ∂p
+∂F
+x
+E
+  .∂E
+∂F
+E H E
+  +B  ,∂E
+∂F T
+∂H
+∂F
+ B =  μ ∇ × .iω
+1 −1
+H
+ChatGPT can make mistakes. Check important info.

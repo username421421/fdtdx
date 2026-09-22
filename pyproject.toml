@@ -52,6 +52,7 @@ markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "docs: marks tests as docs tests (deselect with '-m \"not docs\"')",
     "simulation: marks tests as simulation tests",
+    "slow: marks tests that take minutes (deselect with -m \"not slow\")",
 ]
 
 [project.optional-dependencies]
