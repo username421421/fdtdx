@@ -166,9 +166,9 @@ def _phasor_fn(sim_fs: float):
         adjoint_objects=obj_a,
         config=cfg,
         key=_KEY,
-        objective_detector="mon",
+        objective_detectors="mon",
         design_detector="des",
-        adjoint_source="adj",
+        adjoint_sources=[["adj"]],
         window=window,
     )
     return fn, obj_f, arr_f, cfg
@@ -510,8 +510,8 @@ class TestUnsupportedConfigurations:
                 adjoint_objects=o,
                 config=cfg,
                 key=_KEY,
-                objective_detector="mon",
+                objective_detectors="mon",
                 design_detector="des",
-                adjoint_source="adj",
+                adjoint_sources=[["adj"]],
                 window=window,
             )

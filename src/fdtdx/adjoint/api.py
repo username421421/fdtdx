@@ -19,6 +19,7 @@ the second call would be a correctness bug).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import jax
@@ -37,11 +38,11 @@ def reciprocity_phasor_fn(
     config: SimulationConfig,
     key: jax.Array,
     *,
-    objective_detector: str,
+    objective_detectors: str | Sequence[str],
     design_detector: str,
     window: jax.Array | None = None,
     cond_limit: float = 1e8,
-) -> Callable[[jax.Array], jax.Array]:
+) -> Callable[[jax.Array], jax.Array | tuple[jax.Array, ...]]:
     """Differentiable monitor phasors from a single placed scene.
 
     Args:
@@ -52,7 +53,9 @@ def reciprocity_phasor_fn(
             ``gradient_config`` should be ``None``; both solves are plain forward
             runs.
         key: PRNG key used for both solves.
-        objective_detector: name of the monitor the figure of merit reads.
+        objective_detectors: monitor name, or a sequence of them. Several
+            monitors cost one adjoint solve, not one each, which is what makes
+            a near-to-far box affordable.
         design_detector: name of the ``PhasorDetector`` covering the design
             region. The returned gradient is nonzero only there.
         window: adjoint excitation envelope; defaults to
@@ -65,10 +68,10 @@ def reciprocity_phasor_fn(
     """
     if window is None:
         window = gaussian_window(int(config.time_steps_total))
-    adjoint_objects, adjoint_source = derive_adjoint_objects(
+    adjoint_objects, adjoint_sources = derive_adjoint_objects(
         objects=objects,
         config=config,
-        objective_detector=objective_detector,
+        objective_detectors=objective_detectors,
         window=window,
         key=key,
     )
@@ -79,9 +82,9 @@ def reciprocity_phasor_fn(
         adjoint_objects=adjoint_objects,
         config=config,
         key=key,
-        objective_detector=objective_detector,
+        objective_detectors=objective_detectors,
         design_detector=design_detector,
-        adjoint_source=adjoint_source,
+        adjoint_sources=adjoint_sources,
         window=window,
         cond_limit=cond_limit,
     )
@@ -93,11 +96,11 @@ def reciprocity_param_fn(
     config: SimulationConfig,
     key: jax.Array,
     *,
-    objective_detector: str,
+    objective_detectors: str | Sequence[str],
     design_detector: str,
     window: jax.Array | None = None,
     cond_limit: float = 1e8,
-) -> Callable[..., jax.Array]:
+) -> Callable[..., jax.Array | tuple[jax.Array, ...]]:
     """Differentiable monitor phasors as a function of design **parameters**.
 
     This is the entry point an optimizer wants: differentiate straight through to
@@ -110,7 +113,7 @@ def reciprocity_param_fn(
         objects: placed objects.
         config: resolved config.
         key: PRNG key.
-        objective_detector: monitor the figure of merit reads.
+        objective_detectors: monitor name, or a sequence of them.
         design_detector: detector covering the design region.
         window: adjoint excitation envelope.
         cond_limit: conditioning ceiling for the amplitude solve.
@@ -132,13 +135,13 @@ def reciprocity_param_fn(
         objects,
         config,
         key,
-        objective_detector=objective_detector,
+        objective_detectors=objective_detectors,
         design_detector=design_detector,
         window=window,
         cond_limit=cond_limit,
     )
 
-    def param_fn(params: Any, **transform_kwargs: Any) -> jax.Array:
+    def param_fn(params: Any, **transform_kwargs: Any):
         updated, _, _ = apply_params(arrays, objects, params, key, **transform_kwargs)
         return phasor_fn(updated.inv_permittivities)
 

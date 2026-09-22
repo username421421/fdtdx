@@ -191,12 +191,12 @@ class TestAdjointSceneDerivation:
     def test_derived_scene_keeps_geometry_and_swaps_the_source(self):
         objects, _arrays, _, config, _ = _scene(sim_fs=20.0)
         window = gaussian_window(int(config.time_steps_total))
-        adj, name = derive_adjoint_objects(
-            objects=objects, config=config, objective_detector="mon", window=window, key=_KEY
+        adj, names = derive_adjoint_objects(
+            objects=objects, config=config, objective_detectors="mon", window=window, key=_KEY
         )
         assert len(adj.sources) == 1
         assert isinstance(adj.sources[0], AdjointCurrentSource)
-        assert adj.sources[0].name == name
+        assert adj.sources[0].name == names[0][0]
         mon = next(d for d in objects.detectors if d.name == "mon")
         assert adj.sources[0].grid_slice_tuple == mon.grid_slice_tuple
         fwd_mat = {o.name for o in objects.static_material_objects}
@@ -224,7 +224,7 @@ class TestOfficialPipelineParity:
             objects,
             config,
             _KEY,
-            objective_detector="mon",
+            objective_detectors="mon",
             design_detector="des",
             window=window,
         )
@@ -262,7 +262,7 @@ class TestMaterialAndGeometryCoverage:
             objects,
             config,
             _KEY,
-            objective_detector="mon",
+            objective_detectors="mon",
             design_detector="des",
             window=window,
         )
@@ -305,7 +305,7 @@ class TestMaterialAndGeometryCoverage:
                 objects,
                 config,
                 _KEY,
-                objective_detector="mon",
+                objective_detectors="mon",
                 design_detector="des",
                 window=window,
             )
@@ -373,7 +373,7 @@ class TestMagneticComponents:
             objects,
             config,
             _KEY,
-            objective_detector="mon",
+            objective_detectors="mon",
             design_detector="des",
             window=window,
         )
@@ -401,3 +401,145 @@ class TestMagneticComponents:
         assert np.all(factor.real < 0), "the magnetic factor must carry the reciprocity sign"
         assert not np.allclose(factor, -1.0), "the half-step phase must not be dropped"
         assert hasattr(_vjp, "make_reciprocity_phasor_fn")
+
+
+class TestNearToFar:
+    """Box-mode near-to-far projection.
+
+    The VJP boundary sits at the detector's raw per-face phasors, so
+    ``FieldProjectionAngleDetector.project`` runs above it as ordinary JAX and
+    the projected far field is FDTDX's own, not a reimplementation. The box
+    expands into one adjoint current per included face, and all faces are driven
+    in a single adjoint solve by superposition.
+    """
+
+    _THETA = jnp.linspace(0.0, 0.5, 4)
+    _PHI = jnp.linspace(0.0, 1.0, 3)
+    _BOX_LO, _BOX_SPAN = _PML + 2, _N - 2 * (_PML + 2)
+
+    def _scene(self, sim_fs=150.0, exact_interpolation=False):
+        config = SimulationConfig(
+            time=sim_fs * 1e-15,
+            grid=UniformGrid(spacing=_RES),
+            backend="cpu",
+            dtype=jnp.float64,
+            courant_factor=0.99,
+            gradient_config=None,
+        )
+        objs, cons = [], []
+        vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
+        objs.append(vol)
+        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+        objs.extend(bd.values())
+        cons.extend(cl)
+        blk = fdtdx.UniformMaterialObject(
+            name="blk",
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            material=fdtdx.Material(permittivity=2.25),
+        )
+        cons.append(blk.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
+        objs.append(blk)
+        src, constraint = _narrowband_dipole("src", (_PML + 1, _N // 2, _N // 2))
+        cons.append(constraint)
+        objs.append(src)
+
+        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+        ff = fdtdx.FieldProjectionAngleDetector(
+            name="ff",
+            partial_grid_shape=(self._BOX_SPAN,) * 3,
+            wave_characters=wcs,
+            exclude_surfaces=("z-",),
+            origin=(0.0, 0.0, 0.0),
+            projection_distance=1e-3,
+            far_field_approx=True,
+            projection_medium=fdtdx.Material(permittivity=1.0),
+            scaling_mode="pulse",
+            dft_subsample=1,
+            dtype=jnp.complex128,
+        )
+        if not exact_interpolation:
+            ff = ff.aset("exact_interpolation", False)
+        cons.append(ff.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(self._BOX_LO,) * 3))
+        objs.append(ff)
+        des = fdtdx.PhasorDetector(
+            name="des",
+            partial_grid_shape=(_DES_SPAN,) * 3,
+            wave_characters=wcs,
+            components=("Ex", "Ey", "Ez"),
+            scaling_mode="pulse",
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+        cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
+        objs.append(des)
+        return fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
+
+    def _fom(self, det, state):
+        out = det.project(state, self._THETA, self._PHI)
+        return -jnp.sum(jnp.abs(out["power"]))
+
+    def test_box_expands_into_one_source_per_face(self):
+        objects, _arrays, _, config, _ = self._scene(sim_fs=20.0)
+        det = next(d for d in objects.detectors if d.name == "ff")
+        assert det._projection_mode == "box"
+        faces = det._included_box_surfaces()
+        assert "z-" not in faces and len(faces) == 5
+        window = gaussian_window(int(config.time_steps_total))
+        adj, names = derive_adjoint_objects(
+            objects=objects, config=config, objective_detectors="ff", window=window, key=_KEY
+        )
+        assert len(names) == 1 and len(names[0]) == len(faces)
+        assert len(adj.sources) == len(faces)
+        # each face source is a one-cell-thick slab on its own normal axis
+        for src in adj.sources:
+            thickness = [hi - lo for lo, hi in src.grid_slice_tuple]
+            assert sorted(thickness)[0] == 1, f"{src.name} is not a face slab: {thickness}"
+
+    def test_projected_far_field_gradient_matches_official(self):
+        objects, arrays, _, config, _ = self._scene()
+        det = next(d for d in objects.detectors if d.name == "ff")
+        window = gaussian_window(int(config.time_steps_total))
+        cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+        def official(ie):
+            arrs = arrays.aset("inv_permittivities", ie)
+            _, out = fdtdx.run_fdtd(arrs, objects, cfg_ck, _KEY, show_progress=False)
+            return self._fom(det, out.detector_states["ff"])
+
+        fn = reciprocity_phasor_fn(
+            arrays,
+            objects,
+            config,
+            _KEY,
+            objective_detectors="ff",
+            design_detector="des",
+            window=window,
+        )
+        ie = arrays.inv_permittivities
+        v_off, g_off = jax.value_and_grad(official)(ie)
+        v_rec, g_rec = jax.value_and_grad(lambda x: self._fom(det, fn(x)))(ie)
+
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12), "forward far field must be identical"
+        gs = next(d for d in objects.detectors if d.name == "des").grid_slice
+        a, b = g_rec[:, *gs], g_off[:, *gs]
+        rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+        cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
+        assert rel < 1e-4, f"near-to-far gradient rel_L2 = {rel:.3e}"
+        assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
+
+    def test_exact_interpolation_is_refused_with_the_remedy(self):
+        """Left on, it would be silently wrong, so it raises and says what to do."""
+        objects, arrays, _, config, _ = self._scene(sim_fs=20.0, exact_interpolation=True)
+        window = gaussian_window(int(config.time_steps_total))
+        with pytest.raises(NotImplementedError, match="exact_interpolation"):
+            reciprocity_phasor_fn(
+                arrays,
+                objects,
+                config,
+                _KEY,
+                objective_detectors="ff",
+                design_detector="des",
+                window=window,
+            )
