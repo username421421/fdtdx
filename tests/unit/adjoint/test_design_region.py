@@ -176,6 +176,48 @@ class TestRefusals:
         with pytest.raises(NotImplementedError, match="dispersive"):
             reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
+    def test_aliasing_stride_is_refused(self):
+        """Measured: rel 4.5e-01 at 2.1 samples per period; strides with 4 or more are accepted."""
+        from fdtdx.adjoint import reciprocity_phasor_fn
+
+        objects, arrays, config = _scene()
+        mon = next(d for d in objects.detectors if d.name == "mon")
+
+        def with_stride(stride):
+            det = PhasorDetector(
+                name="mon", partial_grid_shape=(1, 1, 1), wave_characters=mon.wave_characters, dft_subsample=stride
+            ).place_on_grid(mon.grid_slice_tuple, config, _KEY)
+            return objects.aset("object_list", [det if o is mon else o for o in objects.object_list])
+
+        # 600 nm at 50 nm: 21 samples per period at stride 1, so 3.5 at stride 6 and 4.2 at stride 5
+        with pytest.raises(NotImplementedError, match="samples per period"):
+            reciprocity_phasor_fn(arrays, with_stride(6), config, _KEY, objective_detectors="mon")
+        reciprocity_phasor_fn(arrays, with_stride(5), config, _KEY, objective_detectors="mon")
+
+    def test_bloch_boundary_with_a_wave_vector_is_refused(self):
+        """Measured before the guard: rel 1.24 at cosine 0.35, forward value exact."""
+        from fdtdx.adjoint import reciprocity_phasor_fn
+        from fdtdx.objects.boundaries.bloch import BlochBoundary
+
+        objects, arrays, config = _scene()
+        bloch = BlochBoundary(
+            name="bloch_min_x", axis=0, direction="-", partial_grid_shape=(1, _N, _N), bloch_vector=(2e6, 0.0, 0.0)
+        ).place_on_grid(((0, 1), (0, _N), (0, _N)), config, _KEY)
+        objects = objects.aset("object_list", [*objects.object_list, bloch])
+        with pytest.raises(NotImplementedError, match="Bloch"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+    def test_full_tensor_permittivity_is_refused(self):
+        """The adjoint current would inject xx, xy, xz instead of the diagonal."""
+        from fdtdx.adjoint import reciprocity_phasor_fn
+
+        objects, arrays, config = _scene()
+        tensor = jnp.ones((9, _N, _N, _N), dtype=arrays.inv_permittivities.dtype)
+        with pytest.raises(NotImplementedError, match="full 3x3 tensor"):
+            reciprocity_phasor_fn(
+                arrays.aset("inv_permittivities", tensor), objects, config, _KEY, objective_detectors="mon"
+            )
+
 
 class TestStoredComponentOrder:
     def test_phasor_detector_stacks_components_canonically(self):

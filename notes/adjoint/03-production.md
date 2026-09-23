@@ -186,16 +186,16 @@ continuation schedule such as `beta=` stays live per optimizer step.
 
 ## Still open
 
-* **Near-to-far.** The colour splitter's `FieldProjectionAngleDetector` is a
-  box-mode detector with per-face state; only plain `PhasorDetector` is
-  supported. The intended route is to record raw surface phasors and do the
-  projection in JAX above the VJP boundary, which should work because the
-  boundary sits at the raw phasors, but it is untested.
+* **Near-to-far.** Done, see `04-near-to-far.md`, including the stock
+  `exact_interpolation=True`.
 * **Design-dependent loss.** Meep's `MaterialGrid(damping=...)` makes sigma a
   function of the design variable, which is a genuinely new term. Constant loss
   is covered; this is not.
-* **Dispersive design regions.** Untested.
-* **`dft_subsample > 1`, `reduce_volume`, `exact_interpolation`** all still raise.
+* **Dispersive design regions.** Refused in `reciprocity_param_fn`.
+* **`reduce_volume`** still raises. `exact_interpolation` (both of FDTDX's
+  branches, periodic wrap and symmetry mirror included) and `dft_subsample`
+  (down to four samples per period) are accepted; see the module docstrings of
+  `fdtdx.adjoint.recording` and `fdtdx.adjoint.vjp`.
 * **Not compared against Meep**, and not run on the RGB metalens.
 * **`reversible` gradients contain NaN** in the PML at both precisions
   (46% of cells on a 32³ scene with a 6-cell PML). Unrelated to this work, but

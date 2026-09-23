@@ -91,8 +91,13 @@ class AdjointCurrentSource(Source):
         if self.window.ndim != 1:
             raise ValueError(f"window must be one-dimensional, got shape {self.window.shape}")
 
-    def _waveform(self, time_step: jax.Array) -> jax.Array:
-        """Injected current at ``time_step``, shape ``(num_components, *grid_shape)``."""
+    def _waveform(self, time_step: jax.Array, components: tuple[int, ...] | None = None) -> jax.Array:
+        """Injected current at ``time_step``, shape ``(num_components, *grid_shape)``.
+
+        ``components`` restricts it to those indices of :attr:`components`, in that
+        order. ``update_E`` and ``update_H`` each need only their own family, and the
+        frequency contraction is the injection's whole cost.
+        """
         dt = self._config.time_step_duration
         # No explicit float64: under x64 this is float64 and under float32 runs it
         # is float32, which matches whatever precision PhasorDetector.update uses.
@@ -100,7 +105,12 @@ class AdjointCurrentSource(Source):
         omega = jnp.asarray(self.angular_frequencies)
         t = time_step * dt
         phase = jnp.exp(1j * omega * t)
-        acc = jnp.tensordot(phase, self.amplitudes, axes=((0,), (0,)))
+        amplitudes = self.amplitudes
+        if components is not None:
+            lo, hi = components[0], components[-1] + 1
+            # contiguous (the canonical E-then-H order) is a plain slice, else a gather
+            amplitudes = amplitudes[:, lo:hi] if tuple(range(lo, hi)) == components else amplitudes[:, components, ...]
+        acc = jnp.tensordot(phase, amplitudes, axes=((0,), (0,)))
         # update_H is called with ``time_step + 0.5`` (fdtd/update.py:813), the Yee
         # half-step, so ``time_step`` is not always an integer. The carrier phase
         # above uses that exact half-integer time, which is what makes the magnetic
@@ -122,7 +132,7 @@ class AdjointCurrentSource(Source):
         if not active:
             return arr
 
-        waveform = self._waveform(time_step)
+        waveform = self._waveform(time_step, tuple(k for k, _ in active))
         c_courant = self._config.courant_number
         sign = -1.0 if not inverse else 1.0
         gs = self.grid_slice
@@ -132,16 +142,21 @@ class AdjointCurrentSource(Source):
         else:
             inv_local = inv_material
 
-        for k, axis in active:
+        # One update of the field array per family, not one per component: inside the
+        # time loop each indexed add can cost a copy of the whole array, which made
+        # the currents of a five-face box cost three bare solves. Absent components
+        # get an exact zero.
+        update = jnp.zeros((arr.shape[0], *waveform.shape[1:]), dtype=arr.dtype)
+        for j, (_k, axis) in enumerate(active):
             if isinstance(inv_local, jax.Array) and inv_local.ndim > 0:
                 # inv_permittivities is (1, ...) when isotropic and (3, ...) when
                 # diagonally anisotropic; index the component only when present.
                 factor = inv_local[axis] if inv_local.shape[0] > 1 else inv_local[0]
             else:
                 factor = inv_local
-            injection = sign * c_courant * factor * waveform[k]
-            arr = arr.at[axis, *gs].add(injection.astype(arr.dtype))
-        return arr
+            injection = sign * c_courant * factor * waveform[j]
+            update = update.at[axis].set(injection.astype(arr.dtype))
+        return arr.at[:, *gs].add(update)
 
     def update_E(
         self,

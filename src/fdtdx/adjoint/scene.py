@@ -15,8 +15,9 @@ only difference being one extra source object:
 The forward and adjoint runs would then be simulating different structures, and
 nothing downstream would notice. So the adjoint container is derived from the
 placed forward container instead: same grid, same materials, same device, every
-``Source`` swapped for adjoint current sources placed on the objective monitors'
-own cells.
+``Source`` swapped for adjoint current sources placed on the cells the objective
+monitors read: their own cells for raw fields, the co-location stencil's reach
+for ``exact_interpolation=True`` (:mod:`fdtdx.adjoint.recording`).
 
 A box-mode field projection detector expands into one source per included face,
 because it stores one phasor array per face and each face needs its own adjoint
@@ -37,6 +38,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from fdtdx.adjoint.recording import channel_recordings
 from fdtdx.config import SimulationConfig
 from fdtdx.core.jax.default_key import default_key
 from fdtdx.core.switch import OnOffSwitch
@@ -204,10 +206,13 @@ def derive_adjoint_objects(
     """Return an adjoint container derived from a placed forward container.
 
     Every :class:`Source` is dropped and replaced with adjoint current sources:
-    one per plain objective monitor, or one per included face for a box-mode
-    field projection detector. Each carries zero amplitudes; the reciprocity VJP
-    fills them in its backward rule, which is cheap because they are traced
-    leaves.
+    one per stored phasor array (the monitor itself, or each included face of a
+    box-mode field projection detector) and per contiguous block of the cells
+    that array reads (:func:`~fdtdx.adjoint.recording.channel_recordings`): the
+    detector's own cells for raw fields, the co-location stencil's support for
+    ``exact_interpolation=True``, split in two where it wraps around a periodic
+    axis. Each carries zero amplitudes; the reciprocity VJP fills them in its
+    backward rule, which is cheap because they are traced leaves.
 
     The sources are placed with ``place_on_grid`` rather than through
     ``place_objects``, so the resolved grid, materials and device parameters are
@@ -223,8 +228,8 @@ def derive_adjoint_objects(
 
     Returns:
         ``(adjoint_objects, source_names)`` where ``source_names[i]`` lists the
-        sources for ``objective_detectors[i]``, ordered to match
-        :func:`detector_channels`.
+        sources for ``objective_detectors[i]``, ordered by the channels of
+        :func:`detector_channels` and, within a channel, by its blocks.
 
     Raises:
         ValueError: if a named detector is missing or is not a Detector, or the
@@ -254,24 +259,33 @@ def derive_adjoint_objects(
         omegas = tuple(float(w) for w in detector._angular_frequencies)
         components = canonical_components(detector)
         made: list[str] = []
-        for state_key, slice_tuple in detector_channels(detector, det_name):
-            shape = tuple(hi - lo for lo, hi in slice_tuple)
-            src_name = f"{name_prefix}{det_name}__{state_key}"
-            # Placeholder values, replaced in the backward rule. The dtype follows
-            # the simulation, so a float32 run does not warn about complex128.
-            source = AdjointCurrentSource(
-                name=src_name,
-                amplitudes=jnp.zeros(
-                    (len(omegas), len(components), *shape),
-                    dtype=jnp.complex128 if config.dtype == jnp.float64 else jnp.complex64,
-                ),
-                window=window,
-                angular_frequencies=omegas,
-                components=components,
-                wave_character=detector.wave_characters[0],
-            )
-            sources.append(source.place_on_grid(grid_slice_tuple=slice_tuple, config=config, key=key))
-            made.append(src_name)
+        recordings = channel_recordings(
+            detector, detector_channels(detector, det_name), components, objects=objects, config=config
+        )
+        for rec in recordings:
+            # One source per block of the channel's recording transpose: the
+            # detector's own cells for raw fields, the co-location stencil's
+            # support for exact interpolation (two blocks where it wraps around a
+            # periodic axis).
+            for b_i, block in enumerate(rec.blocks):
+                shape = tuple(hi - lo for lo, hi in block)
+                suffix = "" if len(rec.blocks) == 1 else f"__block{b_i}"
+                src_name = f"{name_prefix}{det_name}__{rec.state_key}{suffix}"
+                # Placeholder values, replaced in the backward rule. The dtype follows
+                # the simulation, so a float32 run does not warn about complex128.
+                source = AdjointCurrentSource(
+                    name=src_name,
+                    amplitudes=jnp.zeros(
+                        (len(omegas), len(components), *shape),
+                        dtype=jnp.complex128 if config.dtype == jnp.float64 else jnp.complex64,
+                    ),
+                    window=window,
+                    angular_frequencies=omegas,
+                    components=components,
+                    wave_character=detector.wave_characters[0],
+                )
+                sources.append(source.place_on_grid(grid_slice_tuple=block, config=config, key=key))
+                made.append(src_name)
         per_detector.append(tuple(made))
 
     kept = [o for o in objects.object_list if not isinstance(o, Source)]

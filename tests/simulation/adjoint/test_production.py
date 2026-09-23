@@ -82,6 +82,7 @@ def _scene(
     mon2_scaling=None,
     design_detector_kwargs=None,
     devices=None,
+    monitor_kwargs=None,
 ):
     """24^3 test scene.
 
@@ -91,6 +92,9 @@ def _scene(
     every test had to write out before the design detector became internal.
     ``devices`` is a list of ``(name, lower_corner, shape)`` replacing the single
     ``"design"`` Device; ``mon2_scaling`` adds a second monitor ``"mon2"``.
+    ``monitor_kwargs``, when given, replaces every setting of the ``"mon"``
+    monitor except its name, shape and frequencies; ``{}`` is PhasorDetector's
+    stock defaults.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
@@ -134,17 +138,16 @@ def _scene(
     objs.append(src)
 
     wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
-    mon = fdtdx.PhasorDetector(
-        name="mon",
-        partial_grid_shape=(1, 1, 1),
-        wave_characters=wcs,
-        components=components,
-        scaling_mode=mon_scaling,
-        dft_subsample=1,
-        exact_interpolation=False,
-        reduce_volume=False,
-        dtype=jnp.complex128,
-    )
+    if monitor_kwargs is None:
+        monitor_kwargs = dict(
+            components=components,
+            scaling_mode=mon_scaling,
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+    mon = fdtdx.PhasorDetector(name="mon", partial_grid_shape=(1, 1, 1), wave_characters=wcs, **monitor_kwargs)
     cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=_MON))
     objs.append(mon)
     if mon2_scaling is not None:
@@ -583,8 +586,15 @@ class TestNearToFar:
             thickness = [hi - lo for lo, hi in src.grid_slice_tuple]
             assert sorted(thickness)[0] == 1, f"{src.name} is not a face slab: {thickness}"
 
-    def test_projected_far_field_gradient_matches_official(self):
-        objects, arrays, _, config, _ = self._scene()
+    @pytest.mark.parametrize("exact_interpolation", [False, True], ids=["raw_fields", "exact_interpolation"])
+    def test_projected_far_field_gradient_matches_official(self, exact_interpolation):
+        """``exact_interpolation=True`` is the detector's forced stock setting.
+
+        It used to be refused: the co-location stencil runs outside the
+        detector's own update. Each face's stencil is now transposed and its
+        adjoint current covers the stencil's support.
+        """
+        objects, arrays, _, config, _ = self._scene(exact_interpolation=exact_interpolation)
         det = next(d for d in objects.detectors if d.name == "ff")
         window = gaussian_window(int(config.time_steps_total))
         cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
@@ -615,20 +625,19 @@ class TestNearToFar:
         assert rel < 1e-4, f"near-to-far gradient rel_L2 = {rel:.3e}"
         assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
 
-    def test_exact_interpolation_is_refused_with_the_remedy(self):
-        """Left on, it would be silently wrong, so it raises and says what to do."""
-        objects, arrays, _, config, _ = self._scene(sim_fs=20.0, exact_interpolation=True)
+    def test_exact_faces_get_the_stencil_support(self):
+        """With exact interpolation each face current covers the stencil's reach, not the face."""
+        objects, _arrays, _, config, _ = self._scene(sim_fs=20.0, exact_interpolation=True)
+        det = next(d for d in objects.detectors if d.name == "ff")
         window = gaussian_window(int(config.time_steps_total))
-        with pytest.raises(NotImplementedError, match="exact_interpolation"):
-            reciprocity_phasor_fn(
-                arrays,
-                objects,
-                config,
-                _KEY,
-                objective_detectors="ff",
-                design_detector="des",
-                window=window,
-            )
+        adj, names = derive_adjoint_objects(
+            objects=objects, config=config, objective_detectors="ff", window=window, key=_KEY
+        )
+        assert len(names[0]) == len(det._included_box_surfaces()) == 5
+        (sx, ex), (sy, ey), (_sz, ez) = det.grid_slice_tuple
+        top = next(s for s in adj.sources if s.name.endswith("phasor_z_plus"))
+        # z+ face at z = ez - 1: x, y reach one cell below, z one cell above
+        assert top.grid_slice_tuple == ((sx - 1, ex), (sy - 1, ey), (ez - 1, ez + 1))
 
 
 class TestFluxAndEnergyObjectives:
@@ -996,3 +1005,362 @@ class TestAutoDesignRegion:
         objects, arrays, _, config, _ = _scene(sim_fs=20.0)
         with pytest.raises(ValueError, match="no Device"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+
+def _param_parity(objects, arrays, params, config, fom_states, fom_phasors, name):
+    """Reciprocity vs ``apply_params -> run_fdtd(checkpointed)``, both from the PLACED objects.
+
+    ``fom_states(detector, state)``: the reference FoM on ``run_fdtd``'s detector
+    state; ``fom_phasors(detector, out)`` the same FoM on ``param_fn``'s output.
+    Each side takes the detector from its own applied container.
+    Returns ``(forward values equal, rel_L2, cosine, best-fit scale)``.
+    """
+    cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+    def official(p):
+        arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+        _, out = fdtdx.run_fdtd(arrs, objs, cfg_ck, _KEY, show_progress=False)
+        return fom_states(objs[name], out.detector_states[name])
+
+    v_off, g_off = jax.value_and_grad(official)(params)
+    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors=name)
+    det = param_fn.objects[name]
+    v_rec, g_rec = jax.value_and_grad(lambda p: fom_phasors(det, param_fn(p)))(params)
+    a, b = _flat(g_rec), _flat(g_off)
+    rel, cos = _rel_cos(a, b)
+    scale = float(jnp.sum(a * b) / jnp.sum(a * a))
+    return bool(v_rec == v_off), rel, cos, scale
+
+
+class TestStockObjectives:
+    """Objective monitors at FDTDX's stock settings, as the real problems use them.
+
+    * a plain PhasorDetector given only a name, a shape and frequencies (six
+      components, ``exact_interpolation=True``, continuous, complex64);
+    * a mode port in a 2D x-z scene with two periodic y cells, whose stencil
+      wraps around the periodic axis (FDTDX's padded whole-domain path);
+    * a box far-field projection (exact interpolation forced) with one excluded
+      face, through ``project_all``;
+    * a strided (``dft_subsample``) monitor.
+
+    The scenes go straight from ``place_objects`` into ``reciprocity_param_fn``:
+    their plane source and mode port share the Device's footprint, so
+    ``place_objects`` leaves them unapplied (this used to crash the forward solve
+    with ``'Null' object is not subscriptable``).
+    """
+
+    @pytest.mark.integration
+    def test_stock_monitor_matches_official(self):
+        """The whole stock-default path in one cheap test, run in CI.
+
+        Measured on the GPU (float64): rel 5.4e-07 at cosine 1.0000000000. The
+        monitor records co-located fields, so the co-location stencil's
+        transpose and the magnetic time average are both exercised.
+        """
+        objects, arrays, params, config, _ = _scene(with_device=True, monitor_kwargs={})
+        mon = next(d for d in objects.detectors if d.name == "mon")
+        assert mon.exact_interpolation and len(mon.components) == 6 and mon.scaling_mode == "continuous"
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+        assert v_rec == v_off, "the forward value must be bit-identical to run_fdtd's"
+        rel, cos = _rel_cos(_flat(g_rec), _flat(g_off))
+        assert rel < 1e-5, f"stock monitor: rel_L2 = {rel:.3e}"
+        assert cos > 1 - 1e-6, f"cosine {cos:.10f}"
+
+    def test_stencil_transpose_and_time_average_are_both_needed(self, monkeypatch):
+        """An Hx monitor recorded as if raw: measured rel 2.0e-01 at cosine 0.980 (with them 8.3e-07)."""
+        from fdtdx.adjoint import recording, scene, vjp
+
+        objects, arrays, _, config, _ = _scene(
+            monitor_kwargs=dict(components=("Hx",), scaling_mode="pulse", dtype=jnp.complex128)
+        )
+        _, g_off = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
+        gs = design_region_slice(objects, "block")
+
+        def rel_now():
+            fn = reciprocity_phasor_fn(
+                arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block"
+            )
+            g = jax.grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
+            return _rel_cos(g[:, *gs], g_off[:, *gs])[0]
+
+        assert rel_now() < 1e-5
+        honest = recording.channel_recordings
+
+        def as_raw(detector, *args, **kwargs):
+            return honest(detector.aset("exact_interpolation", False), *args, **kwargs)
+
+        monkeypatch.setattr(scene, "channel_recordings", as_raw)
+        monkeypatch.setattr(vjp, "channel_recordings", as_raw)
+        assert rel_now() > 1e-2
+
+    def test_periodic_mode_port_through_param_fn(self):
+        """2D x-z, two periodic y cells, ModePlaneSource, ModeOverlapDetector at stock settings.
+
+        FoM is the mode power through FDTDX's own ``compute_overlap``. The port
+        spans the periodic axis, so its stencil takes FDTDX's padded
+        whole-domain path and wraps. Measured on the GPU (float64, 300 fs):
+        rel 6.8e-05 at cosine 0.9999999986; ModeOverlap gradients converge
+        more slowly than the FoM (1.7e-03 at 150 fs).
+        """
+        objects, arrays, params, config = _periodic_mode_scene(sim_fs=300.0)
+        port = next(d for d in objects.detectors if d.name == "out")
+        assert port.exact_interpolation and port.grid_slice_tuple[1] == (0, 2)
+
+        def power(det, state):
+            return -jnp.sum(jnp.abs(det.compute_overlap(state)) ** 2)
+
+        same, rel, cos, scale = _param_parity(
+            objects, arrays, params, config, power, lambda det, out: power(det, {"phasor": out}), "out"
+        )
+        assert same, "the forward value must be bit-identical to run_fdtd's"
+        assert rel < 3e-4, f"mode port: rel_L2 = {rel:.3e} (scale {scale:.6f})"
+        assert cos > 1 - 1e-7, f"cosine {cos:.10f}"
+
+    def test_box_far_field_through_param_fn(self):
+        """FieldProjectionAngleDetector box, stock settings, 5 faces, UniformPlaneSource(normalize_by_energy).
+
+        Measured on the GPU (float64, 150 fs): rel 6.1e-07 at cosine 1.0000000000.
+        """
+        objects, arrays, params, config = _box_far_field_scene()
+        theta = jnp.asarray([0.0, 0.3, 0.6, 2.6, 3.0])
+        phi = jnp.asarray([0.0, 0.8, 1.6, 2.4, 3.1])
+
+        def power(det, state):
+            return -jnp.sum(det.project_all(state, theta, phi)["power"])
+
+        same, rel, cos, scale = _param_parity(objects, arrays, params, config, power, power, "ff")
+        assert same, "the forward value must be bit-identical to run_fdtd's"
+        assert rel < 1e-5, f"box far field: rel_L2 = {rel:.3e} (scale {scale:.6f})"
+        assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
+
+    def test_monitor_on_an_electric_symmetry_plane(self):
+        """``config.symmetry`` puts the monitor's stencil through FDTDX's mirror padding.
+
+        24^3 reduced to 12x24x24 by a PEC plane that the Device and a stock
+        monitor both straddle. Measured on the GPU (float64): rel 4.1e-07, and
+        3.8e-07 for the same scene without symmetry.
+        """
+        wl0 = 600e-9
+        config = SimulationConfig(
+            time=150e-15,
+            grid=UniformGrid(spacing=_RES),
+            backend="cpu",
+            dtype=jnp.float64,
+            courant_factor=0.99,
+            gradient_config=None,
+            symmetry=(-1, 0, 0),
+        )
+        vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
+        objs, cons = [vol], []
+        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+        objs.extend(bd.values())
+        cons.extend(cl)
+
+        def at(obj, lower):
+            objs.append(obj)
+            cons.append(obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+
+        wc = fdtdx.WaveCharacter(wavelength=wl0)
+        at(
+            fdtdx.Device(
+                name="design",
+                partial_grid_shape=(8, 8, 4),
+                partial_voxel_grid_shape=(1, 1, 1),
+                materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+                param_transforms=[],
+            ),
+            (8, 8, 9),
+        )
+        at(
+            fdtdx.UniformPlaneSource(
+                name="source",
+                partial_grid_shape=(_N, _N, 1),
+                direction="+",
+                fixed_E_polarization_vector=(1, 0, 0),
+                wave_character=wc,
+                temporal_profile=fdtdx.GaussianPulseProfile(
+                    center_wave=wc, spectral_width=fdtdx.WaveCharacter(frequency=0.3 * float(c0 / wl0))
+                ),
+                normalize_by_energy=True,
+            ),
+            (0, 0, 5),
+        )
+        at(fdtdx.PhasorDetector(name="mon", partial_grid_shape=(4, 4, 1), wave_characters=(wc,)), (10, 10, 17))
+        objects, arrays, params, config, _ = fdtdx.place_objects(
+            object_list=objs, config=config, constraints=cons, key=_KEY
+        )
+        mon = next(d for d in objects.detectors if d.name == "mon")
+        assert mon.grid_slice_tuple[0][0] == 0, "the monitor must touch the reduced domain's symmetry plane"
+
+        def fom(_det, state):
+            return _FOM(state["phasor"])
+
+        same, rel, cos, scale = _param_parity(
+            objects, arrays, _varied(params), config, fom, lambda det, out: _FOM(out), "mon"
+        )
+        assert same, "the forward value must be bit-identical to run_fdtd's"
+        assert rel < 1e-5, f"symmetry plane: rel_L2 = {rel:.3e} (scale {scale:.6f})"
+        assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
+
+    @pytest.mark.parametrize("scaling_mode", ["continuous", "pulse"])
+    def test_strided_monitor_matches_the_strided_reference(self, scaling_mode):
+        """``dft_subsample=3`` against the exact gradient of the strided recording.
+
+        Only the principal term of the strided DFT is transposed; its aliases sit
+        where a band-limited source puts no field. Measured on the GPU (float64):
+        rel 5.5e-07 at strides 2, 3 and 5, the same as stride 1.
+        """
+        objects, arrays, params, config, _ = _scene(
+            with_device=True, monitor_kwargs=dict(dft_subsample=3, scaling_mode=scaling_mode)
+        )
+        assert next(d for d in objects.detectors if d.name == "mon")._dft_stride == 3
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+        assert v_rec == v_off
+        rel, _ = _rel_cos(_flat(g_rec), _flat(g_off))
+        assert rel < 1e-5, f"stride 3 ({scaling_mode}): rel_L2 = {rel:.3e}"
+
+
+def _periodic_mode_scene(sim_fs):
+    """The neural-to-coverage problems' layout: 2D x-z, periodic y of two cells, PML on x and z."""
+    wl0, wls, nx, ny, nz, pml = 1.2e-6, (1.15e-6, 1.25e-6), 48, 2, 32, 8
+    config = SimulationConfig(
+        time=sim_fs * 1e-15,
+        grid=UniformGrid(spacing=_RES),
+        backend="cpu",
+        dtype=jnp.float64,
+        courant_factor=0.99,
+        gradient_config=None,
+    )
+    air, core = fdtdx.Material(permittivity=1.0), fdtdx.Material(permittivity=4.0)
+    vol = fdtdx.SimulationVolume(name="volume", partial_grid_shape=(nx, ny, nz), material=air)
+    objs, cons = [vol], []
+    boundary = fdtdx.BoundaryConfig(
+        boundary_type_miny="periodic",
+        boundary_type_maxy="periodic",
+        thickness_grid_minx=pml,
+        thickness_grid_maxx=pml,
+        thickness_grid_miny=1,
+        thickness_grid_maxy=1,
+        thickness_grid_minz=pml,
+        thickness_grid_maxz=pml,
+    )
+    bd, cl = fdtdx.boundary_objects_from_config(boundary, vol)
+    objs.extend(bd.values())
+    cons.extend(cl)
+
+    def at(obj, lower):
+        objs.append(obj)
+        cons.append(obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+
+    def wc(w):
+        return fdtdx.WaveCharacter(wavelength=w)
+
+    at(fdtdx.UniformMaterialObject(name="guide", partial_grid_shape=(nx, ny, 8), material=core), (0, 0, 12))
+    at(
+        fdtdx.Device(
+            name="design",
+            partial_grid_shape=(12, ny, 12),
+            partial_voxel_grid_shape=(1, 2, 1),
+            materials={"background": air, "core": core},
+            param_transforms=[],
+            placement_order=10,
+        ),
+        (18, 0, 10),
+    )
+    pulse = fdtdx.GaussianPulseProfile(
+        center_wave=wc(wl0), spectral_width=fdtdx.WaveCharacter(frequency=0.2 * float(c0 / wl0))
+    )
+    port = dict(mode_index=0, filter_pol="te", partial_grid_shape=(1, ny, 16))
+    at(
+        fdtdx.ModePlaneSource(name="source", direction="+", wave_character=wc(wl0), temporal_profile=pulse, **port),
+        (11, 0, 8),
+    )
+    at(
+        fdtdx.ModeOverlapDetector(name="out", direction="+", wave_characters=tuple(wc(w) for w in wls), **port),
+        (36, 0, 8),
+    )
+    objects, arrays, params, config, _ = fdtdx.place_objects(
+        object_list=objs, config=config, constraints=cons, key=_KEY
+    )
+    return objects, arrays, _varied(params), config
+
+
+def _box_far_field_scene(sim_fs=150.0):
+    """The colour splitter's layout: plane wave down onto a Device on a substrate, box far field around it."""
+    wl0 = 600e-9
+    config = SimulationConfig(
+        time=sim_fs * 1e-15,
+        grid=UniformGrid(spacing=_RES),
+        backend="cpu",
+        dtype=jnp.float64,
+        courant_factor=0.99,
+        gradient_config=None,
+    )
+    vol = fdtdx.SimulationVolume(partial_grid_shape=(24, 24, 30))
+    objs, cons = [vol], []
+    bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+    objs.extend(bd.values())
+    cons.extend(cl)
+
+    def at(obj, lower):
+        objs.append(obj)
+        cons.append(obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+
+    def wc(w):
+        return fdtdx.WaveCharacter(wavelength=w)
+
+    at(
+        fdtdx.UniformMaterialObject(
+            name="substrate", partial_grid_shape=(24, 24, 10), material=fdtdx.Material(permittivity=2.1)
+        ),
+        (0, 0, 0),
+    )
+    at(
+        fdtdx.Device(
+            name="design",
+            partial_grid_shape=(8, 8, 4),
+            partial_voxel_grid_shape=(1, 1, 1),
+            materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+            param_transforms=[],
+        ),
+        (8, 8, 11),
+    )
+    pulse = fdtdx.GaussianPulseProfile(
+        center_wave=wc(wl0), spectral_width=fdtdx.WaveCharacter(frequency=0.3 * float(c0 / wl0))
+    )
+    at(
+        fdtdx.UniformPlaneSource(
+            name="source",
+            partial_grid_shape=(24, 24, 1),
+            direction="-",
+            fixed_E_polarization_vector=(1, 0, 0),
+            wave_character=wc(wl0),
+            temporal_profile=pulse,
+            normalize_by_energy=True,
+        ),
+        (0, 0, 23),
+    )
+    at(
+        fdtdx.FieldProjectionAngleDetector(
+            name="ff",
+            partial_grid_shape=(12, 12, 10),
+            wave_characters=(wc(550e-9), wc(650e-9)),
+            exclude_surfaces=("z-",),
+        ),
+        (6, 6, 10),
+    )
+    objects, arrays, params, config, _ = fdtdx.place_objects(
+        object_list=objs, config=config, constraints=cons, key=_KEY
+    )
+    return objects, arrays, _varied(params), config
+
+
+def _varied(params):
+    """Non-uniform float64 parameters, so the gradient is neither symmetric by accident nor float32-limited."""
+    return jax.tree_util.tree_map(
+        lambda x: 0.5 + 0.3 * jnp.sin(jnp.arange(x.size, dtype=jnp.float64).reshape(x.shape)), params
+    )

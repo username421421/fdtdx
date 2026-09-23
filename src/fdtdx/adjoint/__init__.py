@@ -14,6 +14,8 @@ traps behind them.
 """
 
 from fdtdx.adjoint.api import (
+    ReciprocityParamFn,
+    apply_objects_once,
     design_region_slice,
     reciprocity_param_fn,
     reciprocity_phasor_fn,
@@ -28,6 +30,8 @@ from fdtdx.adjoint.scene import derive_adjoint_objects
 from fdtdx.adjoint.vjp import make_reciprocity_phasor_fn
 
 __all__ = [
+    "ReciprocityParamFn",
+    "apply_objects_once",
     "assemble_material_gradient",
     "derive_adjoint_objects",
     "design_region_slice",

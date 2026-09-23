@@ -87,43 +87,40 @@ window lookup, and a scalar `inv_permeabilities` has no leading axis to index.
 The carrier phase keeps the exact half-integer time, which is what puts the
 injection on the right half-step; only the envelope index is floored.
 
-## The one caveat, measured
+## Exact interpolation (formerly the one caveat)
 
-`FieldProjectionAngleDetector` fixes `exact_interpolation=True` and does not
-expose it in its constructor. That interpolation runs in
-`update_detector_states`, **outside** the detector's own `update`, so a VJP that
-replaces the whole time loop never sees it and the co-location stencil would
-have to be transposed back through the Yee grid by hand. It has to be turned
-off:
+`FieldProjectionAngleDetector` fixes `exact_interpolation=True`. That
+interpolation runs in `update_detector_states`, outside the detector's own
+`update`, so it used to be refused, with `aset("exact_interpolation", False)` as
+the workaround (a second-order change to the forward far field: 1.53e-02 at 12
+cells per wavelength, 3.39e-03 at 24). It is now transposed
+(`fdtdx.adjoint.recording`), so the detector runs as FDTDX configures it.
 
-```python
-detector = detector.aset("exact_interpolation", False)
-```
+The co-location map `R` is linear, purely spatial and component-diagonal, so it
+commutes with the DFT. The H half of it records `(H_prev + H) / 2`, whose DFT is
+`(1 + exp(+i w dt)) / 2` times the post-update one: a per-frequency factor, not
+two injections at different half-steps. Composed with the existing half-step
+factor the magnetic target becomes `-exp(-i w dt/2) (1 + exp(i w dt)) / 2 =
+-cos(w dt/2)`, kept in the code as the product of the two named terms.
 
-The detector then records raw Yee fields rather than co-located ones. That is a
-real change to the forward far field, but a second-order one that converges away:
+`R^T` is `jax.linear_transpose` of FDTDX's own `interpolate_fields`, on the same
+branch `update_detector_states` takes: the `(s-1, e+1)` block for an interior
+detector, and the padded whole domain (`pad_fields_with_symmetry_mirror`:
+periodic wrap, zero halo, mirror) for one touching an edge. The cells its
+cotangent lands on are found numerically at setup and one adjoint current is
+placed per contiguous block, so a stencil that wraps around a periodic axis gets
+two. For an interior face the block is `(s-1, e)` in x and y and `(s, e+1)` in z.
 
-| resolution | cells per wavelength | relative difference |
-| --- | --- | --- |
-| 50 nm | 12 | 1.53e-02 |
-| 25 nm | 24 | 3.39e-03 |
-
-A 4.5x reduction for 2x resolution, so O(h^2). The **gradient** is unaffected
-either way, matching `run_fdtd` to 6.4e-07. Leaving interpolation on raises,
-with a message stating exactly this.
-
-Implementing the co-location transpose would remove the caveat. It looks
-tractable, since `interpolate_fields` appears linear and `jax.linear_transpose`
-would give the stencil directly, but the H cotangent splits half and half
-between `H_prev` and `H`, which live at different half-steps, and a single
-source injects at one. That is the natural next piece.
+Measured against `run_fdtd(checkpointed)` through `reciprocity_param_fn` on the
+colour splitter's layout (UniformPlaneSource with `normalize_by_energy`, Device
+on a substrate, stock box, `z-` excluded, `project_all` power at five angles,
+two wavelengths), float64 GPU: rel 6.1e-07 at 150 fs, 2.7e-07 at 300 fs, cosine
+1.0000000000, forward identical. float32: 1.3e-06.
 
 ## Still open
 
-* Co-location transpose, as above.
 * Design-dependent loss, i.e. Meep's `MaterialGrid(damping=...)`, where sigma is
   a function of the design variable.
 * Dispersive design regions.
-* `dft_subsample > 1`, `reduce_volume`, and mode-overlap or diffraction-order
-  detectors, all of which still raise.
+* `reduce_volume` and diffraction-order detectors still raise.
 * Not compared against Meep, and not yet run on the RGB metalens itself.

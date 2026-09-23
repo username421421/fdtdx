@@ -25,13 +25,23 @@ The design region needs no detector. By default it is every
 :class:`~fdtdx.objects.device.device.Device` in the scene; the detector that
 records the fields there is built internally, in the one configuration the
 kernel is calibrated for (:data:`~fdtdx.adjoint.scene.DESIGN_DETECTOR_SETTINGS`).
-Both of PhasorDetector's scaling modes are accepted on the objective monitors.
+Objective monitors are accepted at PhasorDetector's stock settings: both scaling
+modes; ``exact_interpolation=True``, whose co-location stencil is transposed
+exactly (:mod:`fdtdx.adjoint.recording`), including the padded whole-domain path
+FDTDX takes for a detector touching the domain edge or a symmetry plane, or
+spanning a periodic axis;
+and ``dft_subsample`` strides, treated as the every-step DFT they estimate (see
+Accuracy).
 
 Restrictions, all enforced with an exception rather than silently approximated:
 
-* On the objective monitors: ``dft_subsample`` resolving to stride 1,
-  ``reduce_volume=False``, ``exact_interpolation=False``, no apodization, and a
-  switch that records every time step.
+* On the objective monitors: ``reduce_volume=False``, no apodization, a switch
+  that records every time step, and a ``dft_subsample`` stride leaving at least
+  four samples per period of the highest objective frequency.
+* No Bloch boundary with a nonzero ``bloch_vector`` (the adjoint scene would need
+  the opposite wave vector), and no fully anisotropic nine-component
+  ``inv_permittivities`` or ``inv_permeabilities`` (the adjoint current and the
+  gradient kernel both assume a diagonal tensor).
 * The design region must not contain a source. FDTDX sources scale their
   injection by the local ``inv_eps``, a term this gradient does not model.
 * The returned gradient is zero outside the design regions. That is what
@@ -43,6 +53,18 @@ discrete adjoint only once both DFTs have converged. Measured against
 relative L2 error was 1.6e-4 at 100 fs and 6.1e-6 at 400 fs, i.e. it converges
 with decay time rather than sitting at a fixed floor. Give the fields time to
 leave the domain before trusting a tight tolerance.
+
+A strided monitor (``dft_subsample`` > 1) records ``stride * sum over every
+stride-th step``, which is exactly the sum of the every-step DFT at ``w`` and at
+its ``stride - 1`` aliases ``w + k * 2 pi / (stride * dt)``. Only the ``w`` term
+is transposed: the aliases sit near the grid's Nyquist frequency, where a
+band-limited source puts no field, which is the premise of ``dft_subsample``
+itself. The gradient error this leaves tracks the forward phasor's own aliasing.
+Measured against the exact gradient of the strided recording: rel 5.4e-07 to
+5.7e-07 at 21 down to 2.6 samples per period (forward aliasing at most 7.6e-09),
+but 4.5e-01 at 2.1 samples per period, where the forward phasor is itself 70%
+aliased. Strides below four samples per period of the highest objective
+frequency, where FDTDX already warns the phasor may alias, are refused.
 """
 
 from __future__ import annotations
@@ -55,6 +77,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from fdtdx.adjoint.reciprocity import _design_matrix, assemble_material_gradient, gaussian_window
+from fdtdx.adjoint.recording import ChannelRecording, channel_recordings
 from fdtdx.adjoint.scene import (
     DESIGN_DETECTOR_SETTINGS,
     canonical_components,
@@ -63,11 +86,14 @@ from fdtdx.adjoint.scene import (
     is_box_projection,
 )
 from fdtdx.config import SimulationConfig
+from fdtdx.core.null import Null
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.fdtd import checkpointed_fdtd
+from fdtdx.objects.boundaries.bloch import BlochBoundary
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.object import INVALID_SLICE_TUPLE_3D
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
+from fdtdx.objects.sources.tfsf import TFSFPlaneSource
 
 
 def _slices_overlap(a, b) -> bool:
@@ -178,25 +204,95 @@ def _validate_objective_detector(det, role: str) -> None:
             "recording starting at 20 fs of 150 fs, and rel 8.2e+02 at cosine 0.008 starting at "
             "40 fs, neither raising. Record every time step (the default OnOffSwitch())."
         )
-    if det._dft_stride != 1:
+    # A stride's samples are weighted to estimate the every-step DFT and its scale is
+    # divided out with the scaling mode's; only its aliases are neglected (module
+    # docstring), which is safe while the recording itself does not alias. FDTDX
+    # warns below four samples per period of the highest frequency; here that is
+    # where the neglected term stops being negligible, so it is refused there.
+    # exact_interpolation is not checked: its stencil is transposed in fdtdx.adjoint.recording.
+    stride = int(det._dft_stride)
+    f_max = max(abs(float(wc.get_frequency())) for wc in det.wave_characters)
+    samples_per_period = 1.0 / (stride * float(cfg.time_step_duration) * f_max)
+    if stride > 1 and samples_per_period < 4.0:
         raise NotImplementedError(
-            f"The {role} detector has dft_subsample resolving to stride {det._dft_stride}; "
-            "the reciprocity path requires 1."
+            f"The {role} detector's dft_subsample resolves to stride {stride}, {samples_per_period:.2f} "
+            "samples per period of its highest frequency. Below 4 the strided phasor aliases (FDTDX warns "
+            "at placement), and the gradient transposes only its unaliased part: measured rel 4.5e-01 at "
+            "2.1 samples per period with a 0.1 f0 source (forward phasor 70% aliased), and 7.5e-01 at 2.6 "
+            "with a 0.5 f0 source. Use dft_subsample='auto' or a smaller stride."
         )
     if det.reduce_volume:
         raise NotImplementedError(f"The {role} detector must have reduce_volume=False.")
-    if det.exact_interpolation:
+
+
+def _reject_bloch_and_full_tensors(objects: ObjectContainer, arrays: ArrayContainer, role: str) -> None:
+    """Refuse the two scene configurations that are silently wrong at setup.
+
+    * A Bloch boundary with a nonzero wave vector. FDTDX's Bloch update is not its
+      own transpose: the adjoint solve would need the opposite wave vector, and the
+      derived adjoint scene carries the forward one. Measured before this guard:
+      gradient rel 1.24 at cosine 0.35 (200 fs) and rel 1.54 at 0.37 (500 fs), with
+      the forward value exact. A zero wave vector is plain periodicity and is fine.
+    * A nine-component (fully anisotropic) ``inv_permittivities`` or
+      ``inv_permeabilities``. The adjoint current injects ``inv[axis]``, which is the
+      diagonal only for the one- and three-component layouts (for nine it picks
+      xx, xy, xz), and the gradient kernel contracts against a diagonal tensor.
+
+    Raises:
+        NotImplementedError: naming the boundary or the array.
+    """
+    bloch = [
+        f"{b.name!r} (bloch_vector={tuple(b.bloch_vector)})"
+        for b in objects.boundary_objects
+        if isinstance(b, BlochBoundary) and any(float(k) != 0.0 for k in b.bloch_vector)
+    ]
+    if bloch:
         raise NotImplementedError(
-            f"The {role} detector has exact_interpolation=True. That interpolation runs in "
-            "update_detector_states, outside the detector's own update, so a VJP replacing the "
-            "whole time loop never sees it and the co-location stencil would have to be "
-            "transposed back through the Yee grid by hand. Set it off with\n"
-            '    detector = detector.aset("exact_interpolation", False)\n'
-            "before placing. The detector then records raw Yee fields rather than co-located "
-            "ones, which changes the forward far field by a second-order discretization "
-            "amount: measured 1.53e-02 relative at 12 cells per wavelength and 3.39e-03 at 24, "
-            "i.e. it converges away as the grid is refined. The gradient itself is unaffected, "
-            "matching run_fdtd to 6.4e-07 either way."
+            f"The {role} scene has Bloch boundaries with a nonzero wave vector: {', '.join(bloch)}. "
+            "The reciprocity adjoint of a Bloch-periodic scene needs the opposite wave vector, which "
+            "is not implemented, so the gradient would be wrong (measured rel 1.2-1.5) with nothing "
+            "raised. Use periodic boundaries (bloch_vector=0), or run_fdtd with "
+            "GradientConfig(method='checkpointed')."
+        )
+    for label, value in (
+        ("inv_permittivities", arrays.inv_permittivities),
+        ("inv_permeabilities", arrays.inv_permeabilities),
+    ):
+        if isinstance(value, jax.Array) and value.ndim > 0 and value.shape[0] == 9:
+            raise NotImplementedError(
+                f"The {role} scene stores {label} as a full 3x3 tensor (shape {tuple(value.shape)}). "
+                "The adjoint current and the gradient kernel assume an isotropic or diagonal "
+                "material (1 or 3 components), so a fully anisotropic one would be injected and "
+                "differentiated wrongly. Use run_fdtd with GradientConfig(method='checkpointed')."
+            )
+
+
+def _reject_unapplied_sources(objects: ObjectContainer) -> None:
+    """Refuse a TFSF plane source that was never applied, before it crashes the solve.
+
+    ``place_objects`` leaves every object whose projection overlaps a Device's
+    unapplied, and a TFSF source's incident fields and time offsets stay unset
+    until ``apply``. The forward solve then fails deep inside the time loop with
+    ``TypeError: 'Null' object is not subscriptable``.
+
+    Raises:
+        ValueError: naming the sources and the two remedies.
+    """
+    unapplied = [
+        f"{src.name!r} ({type(src).__name__})"
+        for src in objects.sources
+        if isinstance(src, TFSFPlaneSource)
+        and any(
+            getattr(src, f, None) is None or isinstance(getattr(src, f), Null)
+            for f in ("_E", "_H", "_time_offset_E", "_time_offset_H")
+        )
+    ]
+    if unapplied:
+        raise ValueError(
+            f"Source(s) {', '.join(unapplied)} were never applied: place_objects skips every object "
+            "whose projection overlaps a Device's, and apply_params applies them. Use "
+            "reciprocity_param_fn, which applies them once at setup, or pass the objects returned by "
+            "apply_params."
         )
 
 
@@ -266,7 +362,10 @@ def make_reciprocity_phasor_fn(
             exist in both containers.
         adjoint_sources: for each objective detector, the source names for its
             channels, ordered as :func:`~fdtdx.adjoint.scene.detector_channels`
-            returns them.
+            returns them and, within a channel, by the blocks of
+            :func:`~fdtdx.adjoint.recording.channel_recordings`. Each source must
+            cover exactly its block; for a raw-field monitor that is the
+            monitor's own cells.
         window: adjoint excitation envelope; defaults to
             :func:`gaussian_window` over the full run.
         cond_limit: conditioning ceiling for the amplitude solve, checked here so
@@ -296,6 +395,9 @@ def make_reciprocity_phasor_fn(
     obj_dets = [_find(forward_objects.detectors, n, "detector") for n in det_names]
     for name, det in zip(det_names, obj_dets):
         _validate_objective_detector(det, f"objective {name!r}")
+    _reject_bloch_and_full_tensors(forward_objects, forward_arrays, "forward")
+    _reject_bloch_and_full_tensors(adjoint_objects, adjoint_arrays, "adjoint")
+    _reject_unapplied_sources(forward_objects)
 
     # Private copies of both scenes: objective monitors kept in the forward one
     # only, since the adjoint run is read at the design region alone, and one
@@ -337,13 +439,20 @@ def make_reciprocity_phasor_fn(
     courant = float(config.courant_number)
     T = int(config.time_steps_total)
 
-    # Flatten every objective detector into channels, one adjoint current each.
-    channels: list[tuple[int, str, int]] = []  # (detector index, state key, source index in object_list)
+    # Flatten every objective detector into channels (one per stored phasor array),
+    # each with the transpose of what it records and one adjoint current per block
+    # of that transpose's support.
+    channels: list[tuple[int, ChannelRecording, tuple[int, ...]]] = []  # (detector, recording, source indices)
     returns_dict: list[bool] = []
     for d_i, (name, det, group) in enumerate(zip(det_names, obj_dets, src_groups)):
         chans = detector_channels(det, name)
-        if len(chans) != len(group):
-            raise ValueError(f"detector {name!r} needs {len(chans)} adjoint source(s) but {len(group)} given")
+        # The adjoint current must follow the order the phasors are STORED in,
+        # which is canonical whatever order `components` was declared in.
+        stored = canonical_components(det)
+        recordings = channel_recordings(det, chans, stored, objects=forward_objects, config=config)
+        needed = sum(len(rec.blocks) for rec in recordings)
+        if needed != len(group):
+            raise ValueError(f"detector {name!r} needs {needed} adjoint source(s) but {len(group)} given")
         det_omegas = tuple(float(w) for w in det._angular_frequencies)
         # Tolerance, not equality: a float32 run stores frequencies in float32, so
         # a round-tripped value no longer equals the Python float it came from.
@@ -354,20 +463,30 @@ def make_reciprocity_phasor_fn(
                 f"detector {name!r} has frequencies {det_omegas}, expected {omegas}; all objective "
                 "monitors must share frequencies because they share one amplitude solve"
             )
-        # The adjoint current must follow the order the phasors are STORED in,
-        # which is canonical whatever order `components` was declared in.
-        stored = canonical_components(det)
-        for (state_key, _slice), src_name in zip(chans, group):
-            src = _find(adj_objects.sources, src_name, "source")
-            if not isinstance(src, AdjointCurrentSource):
-                raise ValueError(f"{src_name!r} is a {type(src).__name__}, not an AdjointCurrentSource")
-            if tuple(src.components) != stored:
-                raise ValueError(
-                    f"adjoint source {src_name!r} components {tuple(src.components)} must match the "
-                    f"order detector {name!r} stores its phasors in, {stored}"
+        names_iter = iter(group)
+        for rec in recordings:
+            indices = []
+            for block in rec.blocks:
+                src_name = next(names_iter)
+                src = _find(adj_objects.sources, src_name, "source")
+                if not isinstance(src, AdjointCurrentSource):
+                    raise ValueError(f"{src_name!r} is a {type(src).__name__}, not an AdjointCurrentSource")
+                if tuple(src.components) != stored:
+                    raise ValueError(
+                        f"adjoint source {src_name!r} components {tuple(src.components)} must match the "
+                        f"order detector {name!r} stores its phasors in, {stored}"
+                    )
+                # A misplaced current is silent, so the placement is checked, not assumed.
+                if tuple(tuple(int(v) for v in ax) for ax in src.grid_slice_tuple) != block:
+                    raise ValueError(
+                        f"adjoint source {src_name!r} covers {src.grid_slice_tuple}, but channel "
+                        f"{rec.state_key!r} of detector {name!r} reads the fields on {block}"
+                        + (" (exact_interpolation widens it by the co-location stencil)" if rec.exact else "")
+                    )
+                indices.append(
+                    next(i for i, o in enumerate(adj_objects.object_list) if getattr(o, "name", None) == src_name)
                 )
-            idx = next(i for i, o in enumerate(adj_objects.object_list) if getattr(o, "name", None) == src_name)
-            channels.append((d_i, state_key, idx))
+            channels.append((d_i, rec, tuple(indices)))
         # more than one state key means the caller receives the whole dict and
         # applies the detector's own readout to it
         returns_dict.append(len(chans) > 1)
@@ -408,7 +527,11 @@ def make_reciprocity_phasor_fn(
     # 6.19e+05, 1.27e-03 and 7.87e+02 for the three non-pulse combinations. The
     # internal design detectors are pulse, so s_d == 1 today; it is still divided
     # out, from the placed detectors themselves, so the two stay consistent.
-    s_m_per_det = [float(d._static_scale()) for d in obj_dets]
+    #
+    # A stride s records every s-th step, and s * (that sum) estimates the every-step
+    # sum, so a strided monitor's P is (_static_scale() / s) * P_raw: pulse mode's
+    # scale IS the stride, and continuous mode's 2/sum(window) counts kept steps only.
+    s_m_per_det = [float(d._static_scale()) / int(d._dft_stride) for d in obj_dets]
     s_d_sq = [float(f._static_scale()) * float(a._static_scale()) for f, a in zip(des_dets, des_dets_a)]
 
     # Magnetic components carry an extra factor, for two independent reasons.
@@ -426,10 +549,20 @@ def make_reciprocity_phasor_fn(
     #
     # Measured on an Hx objective: plain sign flip 1.04e-01, with exp(+i w dt/2)
     # 2.26e-01, with exp(-i w dt/2) 6.3e-07 at cosine 1.000000000.
-    magnetic_factor = -np.exp(-1j * np.asarray(omegas, dtype=np.float64) * dt / 2.0)
+    #
+    # Time average: with exact_interpolation=True the detector records
+    # (H_prev + H) / 2 = (H^{n-1/2} + H^{n+1/2}) / 2 at step n, whose DFT is
+    # (1 + exp(+i w dt)) / 2 times the post-update one. Composed with the half-step
+    # factor this is -cos(w dt / 2), but it is kept as the product of both named
+    # terms: dropping the average costs rel 8.5e-02 at cosine 0.996, and its
+    # conjugate rel 1.8e-01, both silent.
+    w_np = np.asarray(omegas, dtype=np.float64)
+    half_step = -np.exp(-1j * w_np * dt / 2.0)
+    time_average = (1.0 + np.exp(1j * w_np * dt)) / 2.0
     signs: list[jax.Array] = []
-    for d_i, _state_key, _idx in channels:
+    for d_i, rec, _indices in channels:
         det = obj_dets[d_i]
+        magnetic_factor = half_step * time_average if rec.exact else half_step
         is_magnetic = np.asarray([c.startswith("H") for c in canonical_components(det)])
         s = np.where(is_magnetic[None, :], magnetic_factor[:, None], 1.0 + 0.0j) * s_m_per_det[d_i]
         ndim_spatial = len(det.grid_shape)
@@ -468,11 +601,14 @@ def make_reciprocity_phasor_fn(
         # Build the adjoint container HERE, not in a closure: closing over a
         # traced source leaf is what raises UnexpectedTracerError.
         new_list = list(adj_objects.object_list)
-        for (d_i, state_key, idx), sign in zip(channels, signs):
+        for (d_i, rec, indices), sign in zip(channels, signs):
             ct_det = ct[d_i]
-            ct_one = ct_det[state_key] if isinstance(ct_det, dict) else ct_det
-            amplitudes = _solve_amplitudes(ct_one[0], sign)
-            new_list[idx] = new_list[idx].aset("amplitudes", amplitudes)
+            ct_one = ct_det[rec.state_key] if isinstance(ct_det, dict) else ct_det
+            # Cotangent on the recorded values -> cotangent on the raw Yee fields
+            # the adjoint current drives: the identity for a raw-field monitor, the
+            # transposed co-location stencil (and padding) for an exact one.
+            for idx, target in zip(indices, rec.transpose(ct_one[0])):
+                new_list[idx] = new_list[idx].aset("amplitudes", _solve_amplitudes(target, sign))
         objects_a = adj_objects.aset("object_list", new_list)
         arrays_a = adj_arrays.aset("inv_permittivities", inv_eps)
         # One solve for every channel: the adjoint currents superpose, and so do

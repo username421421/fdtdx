@@ -18,6 +18,13 @@ in the scene. The adjoint scene and the detector recording the design-region
 fields are both derived internally, so there is no second scene to keep in sync
 and no second ``place_objects`` call (see :mod:`fdtdx.adjoint.scene` for why the
 second call would be a correctness bug).
+
+``reciprocity_param_fn`` takes the objects straight from ``place_objects``.
+``place_objects`` leaves every object whose projection overlaps a Device's
+unapplied (a plane source spanning the design's footprint, a mode port sharing
+its periodic span), and ``apply_params`` applies them on every call. Here they
+are applied once, at setup, exactly as ``apply_params`` would
+(:func:`apply_objects_once`), and the applied scene is ``param_fn.objects``.
 """
 
 from __future__ import annotations
@@ -29,10 +36,12 @@ import jax
 
 from fdtdx.adjoint.reciprocity import gaussian_window
 from fdtdx.adjoint.scene import derive_adjoint_objects, find_object
-from fdtdx.adjoint.vjp import make_reciprocity_phasor_fn
+from fdtdx.adjoint.vjp import _slices_overlap, make_reciprocity_phasor_fn
 from fdtdx.config import SimulationConfig
+from fdtdx.core.jax.default_key import default_key
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.initialization import apply_params
+from fdtdx.objects.object import SimulationObject
 
 
 def reciprocity_phasor_fn(
@@ -51,7 +60,10 @@ def reciprocity_phasor_fn(
     Args:
         arrays: placed arrays.
         objects: placed objects, carrying the real source and the objective
-            monitors.
+            monitors, in the state ``run_fdtd`` would run them: applied. A TFSF
+            source ``place_objects`` left unapplied (it shares a Device's
+            footprint) raises ``ValueError``; :func:`reciprocity_param_fn`, or
+            :func:`apply_objects_once`, applies it.
         config: resolved config from the same ``place_objects`` call. Its
             ``gradient_config`` should be ``None``; both solves are plain forward
             runs.
@@ -96,6 +108,39 @@ def reciprocity_phasor_fn(
     )
 
 
+class ReciprocityParamFn:
+    """``param_fn(params, **transform_kwargs) -> phasors``, from :func:`reciprocity_param_fn`.
+
+    Attributes:
+        objects: the applied scene both solves run on (see
+            :func:`apply_objects_once`). Read detector post-processing state from
+            it, e.g. the reference mode a ``ModeOverlapDetector`` needs for
+            ``compute_overlap``: in the container ``place_objects`` returned that
+            mode is unset whenever the port shares a Device's footprint.
+        phasor_fn: the underlying ``phasor_fn(inv_permittivities)``.
+    """
+
+    def __init__(
+        self,
+        phasor_fn: Callable[[jax.Array], Any],
+        arrays: ArrayContainer,
+        objects: ObjectContainer,
+        key: jax.Array,
+    ):
+        self.phasor_fn = phasor_fn
+        self.objects = objects
+        self._arrays = arrays
+        self._key = key
+        # apply_params only needs the Devices to write inv_permittivities; handing it
+        # the whole scene would re-apply every overlapping object (a mode solve per
+        # port) on every call, for a result discarded here.
+        self._design_objects = ObjectContainer(object_list=[objects.volume, *objects.devices], volume_idx=0)
+
+    def __call__(self, params: Any, **transform_kwargs: Any):
+        updated, _, _ = apply_params(self._arrays, self._design_objects, params, self._key, **transform_kwargs)
+        return self.phasor_fn(updated.inv_permittivities)
+
+
 def reciprocity_param_fn(
     arrays: ArrayContainer,
     objects: ObjectContainer,
@@ -106,7 +151,7 @@ def reciprocity_param_fn(
     design_detector: str | Sequence[str] | None = None,
     window: jax.Array | None = None,
     cond_limit: float = 1e8,
-) -> Callable[..., jax.Array | tuple[jax.Array, ...]]:
+) -> ReciprocityParamFn:
     """Differentiable monitor phasors as a function of design **parameters**.
 
     This is the entry point an optimizer wants: differentiate straight through to
@@ -116,9 +161,11 @@ def reciprocity_param_fn(
 
     Args:
         arrays: placed arrays.
-        objects: placed objects.
+        objects: placed objects, as ``place_objects`` returned them (applied
+            ones work too).
         config: resolved config.
-        key: PRNG key.
+        key: PRNG key. It seeds :func:`apply_objects_once` the way ``apply_params``
+            would be seeded with it, and both solves.
         objective_detectors: monitor name, or a sequence of them.
         design_detector: leave it out: the default, every ``Device`` in the
             scene, is exactly the set of cells ``apply_params`` writes, so the
@@ -130,27 +177,31 @@ def reciprocity_param_fn(
     Returns:
         ``param_fn(params, **transform_kwargs) -> phasors``. Extra keyword
         arguments are forwarded to ``apply_params``, so a continuation schedule
-        such as ``beta=`` stays live per optimizer step.
+        such as ``beta=`` stays live per optimizer step. ``param_fn.objects`` is
+        the applied scene.
 
     Notes:
-        ``apply_params`` also returns a refreshed ``ObjectContainer``, which is
-        discarded here. That is safe because the refresh runs under
-        ``stop_gradient`` on the permittivities, so the objects carry no
-        parameter gradient; the whole parameter dependence flows through
-        ``arrays.inv_permittivities``.
+        The reference pipeline, ``apply_params`` then ``run_fdtd``, re-applies
+        the objects on every call, under ``stop_gradient``, so they carry no
+        parameter gradient. For an object outside every Device the result is the
+        same on every call, which is why applying it once is exact; an object
+        whose own cells overlap a Device is refused
+        (:func:`apply_objects_once`).
 
         Naming a region that does not cover every ``Device`` drops the
         gradient of the parameters outside it, silently by construction, since
         the reciprocity gradient is zero outside the design regions.
 
     Raises:
-        NotImplementedError: if a ``Device`` has a dispersive material. See
-            :func:`_reject_dispersive_devices`.
+        NotImplementedError: if a ``Device`` has a dispersive material (see
+            :func:`_reject_dispersive_devices`), or an applied object overlaps
+            a Device (see :func:`apply_objects_once`).
     """
     _reject_dispersive_devices(objects)
+    applied = apply_objects_once(arrays, objects, key)
     phasor_fn = reciprocity_phasor_fn(
         arrays,
-        objects,
+        applied,
         config,
         key,
         objective_detectors=objective_detectors,
@@ -158,12 +209,86 @@ def reciprocity_param_fn(
         window=window,
         cond_limit=cond_limit,
     )
+    return ReciprocityParamFn(phasor_fn, arrays, applied, key)
 
-    def param_fn(params: Any, **transform_kwargs: Any):
-        updated, _, _ = apply_params(arrays, objects, params, key, **transform_kwargs)
-        return phasor_fn(updated.inv_permittivities)
 
-    return param_fn
+def _has_own_apply(obj: SimulationObject) -> bool:
+    return type(obj).apply is not SimulationObject.apply
+
+
+def apply_objects_once(
+    arrays: ArrayContainer,
+    objects: ObjectContainer,
+    key: jax.Array | None,
+) -> ObjectContainer:
+    """Apply the objects ``apply_params`` refreshes, once, as it would.
+
+    ``place_objects`` applies an object only when no Device's projection
+    overlaps its own on any axis (``SimulationObject.check_overlap``), so a plane
+    source above a design, or a mode port on the periodic span a design also
+    fills, comes back unapplied and crashes the solve. ``apply_params`` applies
+    exactly those objects on every call. This runs that same loop -- same
+    objects, same order, the same ``key`` split once per applied object, the
+    same ``stop_gradient`` material arrays -- without the design parameters.
+
+    That is exact for every object whose ``apply`` reads only cells outside the
+    Devices, which FDTDX's sources and mode detectors do (each reads its own
+    slice). An object with its own ``apply`` whose cells overlap a Device would
+    see the design, so its applied state would change with the parameters; it
+    is refused rather than frozen at one design.
+
+    Args:
+        arrays: the placed arrays. ``initial_inv_permittivities`` is used when
+            set, as ``apply_params`` does.
+        objects: placed objects, applied or not.
+        key: the key ``apply_params`` would be called with.
+
+    Returns:
+        A new container with those objects applied; ``objects`` is unchanged.
+
+    Raises:
+        NotImplementedError: naming an applied object that overlaps a Device.
+    """
+    key = default_key(key)
+    devices = objects.devices
+    inside = [
+        f"{getattr(obj, 'name', None)!r} ({type(obj).__name__}) in {dev.name!r}"
+        for obj in objects.object_list
+        if _has_own_apply(obj)
+        for dev in devices
+        if _slices_overlap(obj.grid_slice_tuple, dev.grid_slice_tuple)
+    ]
+    if inside:
+        raise NotImplementedError(
+            f"Object(s) {', '.join(inside)} overlap a Device and compute their state from the "
+            "material there (a mode solve or an impedance), so that state changes with the design "
+            "parameters. reciprocity_param_fn applies such objects once, at setup, which is exact "
+            "only outside the Devices. Move them out of the design region, or use run_fdtd with "
+            "GradientConfig(method='checkpointed')."
+        )
+
+    inv_eps = arrays.initial_inv_permittivities
+    if inv_eps is None:
+        inv_eps = arrays.inv_permittivities
+
+    def frozen(value):
+        return None if value is None else jax.lax.stop_gradient(value)
+
+    new_list = []
+    for obj in objects.object_list:
+        if any(dev.check_overlap(obj) for dev in devices):
+            key, subkey = jax.random.split(key)
+            obj = obj.apply(
+                key=subkey,
+                inv_permittivities=jax.lax.stop_gradient(inv_eps),
+                inv_permeabilities=jax.lax.stop_gradient(arrays.inv_permeabilities),
+                dispersive_c1=frozen(arrays.dispersive_c1),
+                dispersive_c2=frozen(arrays.dispersive_c2),
+                dispersive_c3=frozen(arrays.dispersive_c3),
+                electric_conductivity=frozen(arrays.electric_conductivity),
+            )
+        new_list.append(obj)
+    return ObjectContainer(object_list=new_list, volume_idx=objects.volume_idx)
 
 
 def _reject_dispersive_devices(objects: ObjectContainer) -> None:
