@@ -38,6 +38,30 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+#: Default ceiling on ``cond`` of the amplitude-solve matrix. Measured float32
+#: solve error of that matrix against its float64 solution, per condition
+#: number: 8 -> 1.8e-07, 3e2 -> 1.5e-06, 5e3 -> 4.9e-05, 4e5 -> 5.7e-03,
+#: 8e6 -> 8e-02, 7e7 -> 0.46-0.75, i.e. about ``1e-8 * cond``; 1e4 keeps it near
+#: 1e-4. It is also where the colour splitter's gradient stops being usable:
+#: with the default window its cond is 7.97 at 80 fs, 5.1e3 at 40 fs (gradient
+#: rel 0.29, which only the convergence check catches), 3.5e4 at 35 fs (rel 0.78),
+#: 4.3e5 at 30 fs (rel 2.3) and 7.2e7 at 22 fs (rel 20), which the former 1e8
+#: ceiling let through. Every scene in the test suite is at 1.2e3 or below.
+DEFAULT_COND_LIMIT = 1e4
+
+#: Default ceiling on :func:`~fdtdx.adjoint.vjp.dft_tail` above which the
+#: reciprocity function warns that its phasors have not converged. Measured on the
+#: colour splitter (real cell at 100 nm, float64, GPU) against checkpointed
+#: autodiff of the same run, largest tail -> gradient rel, DC-free pulse:
+#: 1.35 -> 19 (22 fs), 0.30 -> 0.29 (40), 6.8e-2 -> 0.14 (50), 1.65e-2 -> 8.8e-2
+#: (80), 1.04e-2 -> 4.3e-2 (120), 5.5e-3 -> 2.0e-2 (160), 1.0e-3 -> 2.6e-3 (320),
+#: 1.75e-4 -> 1.2e-4 (640): the error is 2-5x the tail from 50 fs on, so 1e-2
+#: flags every run measured at 4% or worse and none at 2% or better. With the
+#: DC-carrying production pulse the objective tail floors at 3.1e-2 (a static
+#: remainder the far-field phasors never lose), so that stage keeps warning
+#: while the gradient itself converges (5.1e-3 at 320 fs).
+DEFAULT_TAIL_TOLERANCE = 1e-2
+
 
 def gaussian_window(
     time_steps_total: int,
@@ -91,7 +115,7 @@ def solve_adjoint_amplitudes(
     angular_frequencies: tuple[float, ...],
     dt: float,
     window: jax.Array,
-    cond_limit: float = 1e8,
+    cond_limit: float = DEFAULT_COND_LIMIT,
 ) -> tuple[jax.Array, dict[str, float]]:
     """Sinusoid amplitudes whose windowed sum has DFT ``target_phasors``.
 

@@ -6,6 +6,8 @@ pipeline, and the two material/geometry cases that were previously believed to
 be unsupported.
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -83,6 +85,9 @@ def _scene(
     design_detector_kwargs=None,
     devices=None,
     monitor_kwargs=None,
+    extra_blocks=(),
+    monitor_shape=(1, 1, 1),
+    monitor_cell=_MON,
 ):
     """24^3 test scene.
 
@@ -94,7 +99,8 @@ def _scene(
     ``"design"`` Device; ``mon2_scaling`` adds a second monitor ``"mon2"``.
     ``monitor_kwargs``, when given, replaces every setting of the ``"mon"``
     monitor except its name, shape and frequencies; ``{}`` is PhasorDetector's
-    stock defaults.
+    stock defaults. ``extra_blocks`` are static ``(name, lower, shape, material)``
+    blocks placed before the Devices, so a Device placed over one covers it.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
@@ -112,6 +118,11 @@ def _scene(
     bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
     objs.extend(bd.values())
     cons.extend(cl)
+
+    for name, lower, shape, material in extra_blocks:
+        extra = fdtdx.UniformMaterialObject(name=name, partial_grid_shape=shape, material=material)
+        cons.append(extra.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+        objs.append(extra)
 
     if devices:
         for name, lower, shape in devices:
@@ -147,8 +158,8 @@ def _scene(
             reduce_volume=False,
             dtype=jnp.complex128,
         )
-    mon = fdtdx.PhasorDetector(name="mon", partial_grid_shape=(1, 1, 1), wave_characters=wcs, **monitor_kwargs)
-    cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=_MON))
+    mon = fdtdx.PhasorDetector(name="mon", partial_grid_shape=monitor_shape, wave_characters=wcs, **monitor_kwargs)
+    cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=monitor_cell))
     objs.append(mon)
     if mon2_scaling is not None:
         mon2 = fdtdx.PhasorDetector(
@@ -978,7 +989,8 @@ class TestAutoDesignRegion:
     def test_every_device_gets_its_own_design_region(self):
         """Two Devices: one internal design detector each, both gradients right.
 
-        Naming one Device restricts the gradient to it, so the other's is zero.
+        Naming only one of them is refused: the other Device's parameters would
+        get a zero gradient instead of theirs, with nothing raised.
         """
         half = _DES_SPAN // 2
         devices = [
@@ -994,12 +1006,9 @@ class TestAutoDesignRegion:
             rel, _ = _rel_cos(g_rec[name], g_off[name])
             assert rel < 1e-5, f"auto design regions, device {name}: rel_L2 = {rel:.3e}"
 
-        only_a = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="dA")
-        g_a = jax.grad(lambda p: _FOM(only_a(p)))(params)
-        rel, _ = _rel_cos(g_a["dA"], g_off["dA"])
-        assert rel < 1e-5, f"named device dA: rel_L2 = {rel:.3e}"
-        assert float(jnp.linalg.norm(g_a["dB"])) == 0.0
-        assert float(jnp.linalg.norm(g_off["dB"])) > 0.0
+        assert float(jnp.linalg.norm(g_off["dB"])) > 0.0, "dB must carry a real gradient for the refusal to matter"
+        with pytest.raises(ValueError, match="does not cover every Device"):
+            reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="dA")
 
     def test_no_device_and_no_region_raises(self):
         objects, arrays, _, config, _ = _scene(sim_fs=20.0)
@@ -1364,3 +1373,137 @@ def _varied(params):
     return jax.tree_util.tree_map(
         lambda x: 0.5 + 0.3 * jnp.sin(jnp.arange(x.size, dtype=jnp.float64).reshape(x.shape)), params
     )
+
+
+def _parity_metrics(g_off, g_rec):
+    """``(rel_L2, cosine, best-fit scale)`` of the reciprocity gradient against the official one.
+
+    The scale is ``sum(off * rec) / sum(off * off)``, i.e. ``rec ~ scale * off``: a
+    pure-scale error shows as cosine 1 with a scale away from 1.
+    """
+    a, b = _flat(g_off), _flat(g_rec)
+    rel, cos = _rel_cos(b, a)
+    return rel, cos, float(jnp.sum(a * b) / jnp.sum(a * a))
+
+
+# A lossy block around the monitor cell (18, 12, 12): x 17..19, y 10..14, z 10..14,
+# clear of the design (8..15), the source (5, 12, 12) and the PML (from 20).
+_AROUND_MON = ((17, 10, 10), (3, 5, 5))
+# The same block from y = 12 up, so it covers two of the three cells of a y-line
+# monitor at (18, 11..13, 12).
+_HALF_MON = ((17, 12, 10), (3, 3, 5))
+
+
+class TestLossyMonitor:
+    """An objective monitor inside lossy material.
+
+    FDTDX adds every source after the lossy division by ``1 + a``,
+    ``a = courant * sigma_E * eta0 * inv_eps / 2`` (``1 + b`` on the magnetic
+    side), so the adjoint current in a lossy monitor cell was ``1 + a`` times too
+    strong. Measured before the per-cell correction (GPU, float64): a lossy block
+    around a one-cell Ez monitor rel 2.39e-01 at cosine 1.0000000000, best-fit
+    scale 1.239256 = 1 + a exactly; around an Hx monitor 2.28e-01 (scale 1 + b);
+    a block over two of three line-monitor cells 1.50e-01 at cosine 0.99922. After:
+    8.7e-11, 5.4e-07 and 1.04e-06, and 9.3e-07 for the stock (exact
+    interpolation, continuous) (Ez, Hx) monitor below.
+    """
+
+    def _parity(self, **scene_kwargs):
+        objects, arrays, params, config, _ = _scene(with_device=True, **scene_kwargs)
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+        assert v_rec == v_off, "the forward value must be bit-identical to run_fdtd's"
+        return _parity_metrics(g_off, g_rec)
+
+    def test_electric_loss_around_the_monitor(self):
+        lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
+        rel, cos, scale = self._parity(extra_blocks=[("loss", *_AROUND_MON, lossy)])
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+    def test_magnetic_loss_around_the_monitor(self):
+        lossy = fdtdx.Material(permittivity=1.0, magnetic_conductivity=6e9)
+        rel, cos, scale = self._parity(extra_blocks=[("mloss", *_AROUND_MON, lossy)], components=("Hx",))
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+    def test_partial_loss_under_a_stock_monitor(self):
+        """Loss on two of three cells, both families, stock monitor: the stencil
+        support straddles the lossy edge, so the divisor must be per cell."""
+        lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5, magnetic_conductivity=6e9)
+        rel, cos, scale = self._parity(
+            extra_blocks=[("loss", *_HALF_MON, lossy)],
+            monitor_kwargs=dict(components=("Ez", "Hx"), dtype=jnp.complex128),
+            monitor_shape=(1, 3, 1),
+            monitor_cell=(_MON[0], _MON[1] - 1, _MON[2]),
+        )
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+
+class TestConvergenceDiagnostic:
+    """The DFT tail estimate warns when the phasors have not converged.
+
+    On the colour splitter (real cell at 100 nm, float64) the adjoint design tail
+    tracked the gradient error where it is garbage: 1.46 at 22 fs (rel 20),
+    1.19 at 30 fs (rel 2.3), 0.77 at 35 fs (rel 0.78), 6.8e-02 at 50 fs (rel 0.15).
+    """
+
+    def _value_and_grad(self, sim_fs):
+        from fdtdx.adjoint import ConvergenceWarning
+
+        objects, arrays, params, config, _ = _scene(sim_fs, with_device=True)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+            jax.effects_barrier()
+        convergence = [w for w in caught if issubclass(w.category, ConvergenceWarning)]
+        return (objects, arrays, params, config), g_rec, param_fn.diagnostics, convergence
+
+    def test_converged_scene_is_quiet(self):
+        _, _, diag, convergence = self._value_and_grad(150.0)
+        assert not convergence, [str(w.message) for w in convergence]
+        tails = [
+            v for key in ("objective_tail", "forward_design_tail", "adjoint_design_tail") for v in diag[key].values()
+        ]
+        assert len(tails) == 3 and max(tails) < 1e-4, diag
+
+    def test_truncated_run_warns_and_is_really_wrong(self):
+        # Measured in this scene (CPU, float64): 25 fs warns (objective tail 5.9e-02) and the
+        # gradient is off by rel 2.2e-01; at 30 fs the tails are <= 3.0e-03, the gradient is
+        # within 6.2e-03 and the warning is correctly silent.
+        scene, g_rec, diag, convergence = self._value_and_grad(25.0)
+        assert convergence, f"no ConvergenceWarning, diagnostics {diag}"
+        assert "have not converged" in str(convergence[0].message)
+        _, g_off = _official_param_grad(*scene)
+        rel, cos, _ = _parity_metrics(g_off, g_rec)
+        assert rel > 1e-2, f"the 25 fs gradient was expected to be off, rel {rel:.3e} cos {cos:.6f}"
+
+
+_LORENTZ = fdtdx.Material(
+    permittivity=2.0,
+    dispersion=fdtdx.DispersionModel(
+        poles=(fdtdx.LorentzPole(resonance_frequency=1.3 * _OMEGAS[0], damping=0.1 * _OMEGAS[0], delta_epsilon=0.5),)
+    ),
+)
+
+
+class TestDispersiveBlockUnderDevice:
+    """A dispersive static block whose cells a (non-dispersive) Device covers.
+
+    apply_params zeroes the ADE coefficients in the Device cells on every call;
+    the reciprocity solves took only inv_permittivities and kept the block's.
+    Measured before (GPU, float64): FoM off by 60%, gradient rel 8.3e-01 at
+    cosine 0.66, nothing raised. Half the Device over the block: rel 4.6e-01.
+    """
+
+    def test_device_over_a_lorentz_block_matches_official(self):
+        block = ("lorentz", (_DES_LO,) * 3, (_DES_SPAN,) * 3, _LORENTZ)
+        objects, arrays, params, config, _ = _scene(with_device=True, extra_blocks=[block])
+        sl = objects.devices[0].grid_slice
+        assert float(jnp.max(jnp.abs(arrays.dispersive_c3[:, :, *sl]))) > 0, "the block must be dispersive"
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+        assert v_rec == v_off, f"forward FoM {float(v_rec)!r} vs run_fdtd {float(v_off)!r}"
+        rel, cos, scale = _parity_metrics(g_off, g_rec)
+        assert rel < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"

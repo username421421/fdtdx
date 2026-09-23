@@ -27,14 +27,17 @@ from fdtdx.adjoint.reciprocity import (
     solve_adjoint_amplitudes,
 )
 from fdtdx.adjoint.scene import derive_adjoint_objects
-from fdtdx.adjoint.vjp import make_reciprocity_phasor_fn
+from fdtdx.adjoint.vjp import ConvergenceWarning, ReciprocityPhasorFn, dft_tail, make_reciprocity_phasor_fn
 
 __all__ = [
+    "ConvergenceWarning",
     "ReciprocityParamFn",
+    "ReciprocityPhasorFn",
     "apply_objects_once",
     "assemble_material_gradient",
     "derive_adjoint_objects",
     "design_region_slice",
+    "dft_tail",
     "gaussian_window",
     "leapfrog_kernel",
     "make_reciprocity_phasor_fn",

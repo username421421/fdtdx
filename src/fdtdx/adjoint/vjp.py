@@ -69,15 +69,24 @@ frequency, where FDTDX already warns the phasor may alias, are refused.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from fdtdx.adjoint.reciprocity import _design_matrix, assemble_material_gradient, gaussian_window
-from fdtdx.adjoint.recording import ChannelRecording, channel_recordings
+from fdtdx.adjoint.reciprocity import (
+    DEFAULT_COND_LIMIT,
+    DEFAULT_TAIL_TOLERANCE,
+    _design_matrix,
+    assemble_material_gradient,
+    gaussian_window,
+)
+from fdtdx.adjoint.recording import FAMILY_AXIS, ChannelRecording, channel_recordings
 from fdtdx.adjoint.scene import (
     DESIGN_DETECTOR_SETTINGS,
     canonical_components,
@@ -86,6 +95,7 @@ from fdtdx.adjoint.scene import (
     is_box_projection,
 )
 from fdtdx.config import SimulationConfig
+from fdtdx.constants import eta0
 from fdtdx.core.null import Null
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.fdtd import checkpointed_fdtd
@@ -257,6 +267,11 @@ def _reject_bloch_and_full_tensors(objects: ObjectContainer, arrays: ArrayContai
     for label, value in (
         ("inv_permittivities", arrays.inv_permittivities),
         ("inv_permeabilities", arrays.inv_permeabilities),
+        # a full conductivity tensor switches update_E/H to the coupled anisotropic
+        # update, whose lossy factor is a 3x3 matrix, not the per-component divisor
+        # the adjoint current is corrected by (_LossyInjection)
+        ("electric_conductivity", arrays.electric_conductivity),
+        ("magnetic_conductivity", arrays.magnetic_conductivity),
     ):
         if isinstance(value, jax.Array) and value.ndim > 0 and value.shape[0] == 9:
             raise NotImplementedError(
@@ -316,6 +331,172 @@ def _check_internal_design_detector(det, config: SimulationConfig) -> None:
         raise RuntimeError(f"internal design detector {det.name!r} is misconfigured: {wrong}")
 
 
+def _component_row(arr: jax.Array, axis: int) -> jax.Array:
+    """Row ``axis`` of a ``(1 | 3, ...)`` material array: the one row when isotropic."""
+    return arr[axis] if arr.shape[0] > 1 else arr[0]
+
+
+@dataclass(frozen=True)
+class _LossyInjection:
+    """FDTDX's lossy-update divisor on the cells of one adjoint current.
+
+    ``update_E`` divides the whole curl update by ``1 + a``,
+    ``a = courant * sigma_E * eta0 * inv_eps / 2`` (Schneider 3.12), and only
+    *then* adds the sources, so a current injected in a lossy cell enters the
+    discrete operator ``1 + a`` times stronger than the reciprocal partner of the
+    field the monitor reads there. The cotangent is divided back by ``1 + a``
+    per cell and component; ``update_H`` does the same with
+    ``b = courant * sigma_H * inv_mu / (2 * eta0)``. In a lossy *design* cell the
+    same factor appears on both sides of the reciprocity pairing and cancels,
+    which is why only the injection cells need it. Measured before this
+    correction, a lossy block around a one-cell monitor gave a pure scale error
+    (rel 2.39e-01 at cosine 1.0000000000, best-fit scale exactly ``1 + a``).
+
+    Attributes:
+        index: the block's cells.
+        eps_rows: per stored component, the ``inv_permittivities`` row it uses.
+        electric: ``courant * sigma_E * eta0 / 2`` per component and cell (0 on H).
+        magnetic: ``b`` per component and cell (0 on E); ``inv_mu`` is static.
+    """
+
+    index: tuple[slice, ...]
+    eps_rows: tuple[int, ...]
+    electric: np.ndarray
+    magnetic: np.ndarray
+
+    def divisor(self, inv_eps: jax.Array) -> jax.Array:
+        """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps``."""
+        local = inv_eps[:, *self.index]
+        rows = jnp.stack([local[r] for r in self.eps_rows], axis=0)
+        electric = jnp.asarray(self.electric, dtype=inv_eps.dtype)
+        magnetic = jnp.asarray(self.magnetic, dtype=inv_eps.dtype)
+        return 1.0 + electric * rows + magnetic
+
+
+def _lossy_injection(
+    arrays: ArrayContainer,
+    courant: float,
+    block: Sequence[tuple[int, int]],
+    components: Sequence[str],
+) -> _LossyInjection | None:
+    """The lossy-update divisor on ``block``, or ``None`` where every cell is lossless."""
+    sigma_e = arrays.electric_conductivity
+    sigma_h = arrays.magnetic_conductivity
+    if sigma_e is None and sigma_h is None:
+        return None
+    index = tuple(slice(int(lo), int(hi)) for lo, hi in block)
+    shape = tuple(int(hi) - int(lo) for lo, hi in block)
+    electric = np.zeros((len(components), *shape))
+    magnetic = np.zeros((len(components), *shape))
+    n_eps = int(arrays.inv_permittivities.shape[0])
+    inv_mu = arrays.inv_permeabilities
+    eps_rows = []
+    for k, comp in enumerate(components):
+        family, axis = FAMILY_AXIS[comp]
+        eps_rows.append(axis if n_eps > 1 else 0)
+        if family == 0 and sigma_e is not None:
+            sigma = np.asarray(jax.device_get(_component_row(sigma_e, axis)[index]), dtype=np.float64)
+            electric[k] = courant * float(eta0) * sigma / 2.0
+        elif family == 1 and sigma_h is not None:
+            sigma = np.asarray(jax.device_get(_component_row(sigma_h, axis)[index]), dtype=np.float64)
+            if isinstance(inv_mu, jax.Array) and inv_mu.ndim > 0:
+                mu = np.asarray(jax.device_get(_component_row(inv_mu, axis)[index]), dtype=np.float64)
+            else:
+                mu = float(inv_mu)
+            magnetic[k] = courant * sigma * mu / (2.0 * float(eta0))
+    if not electric.any() and not magnetic.any():
+        return None
+    return _LossyInjection(index=index, eps_rows=tuple(eps_rows), electric=electric, magnetic=magnetic)
+
+
+class ConvergenceWarning(UserWarning):
+    """The phasors a reciprocity gradient is built from have not converged.
+
+    Reciprocity is a frequency-domain identity: it equals the exact discrete
+    adjoint only once the forward and adjoint DFTs have converged, i.e. once the
+    fields have left the domain. See :func:`dft_tail`.
+    """
+
+
+def dft_tail(
+    fields: jax.Array,
+    phasors: jax.Array,
+    angular_frequencies: Sequence[float],
+    dt: float,
+    rel_floor: float = 1e-3,
+) -> jax.Array:
+    """Estimated DFT truncation error of ``phasors``, relative to their size.
+
+    ``fields`` are the fields left on the phasors' cells at the last step,
+    ``(nc, *cells)``, and ``phasors`` the DFT they were accumulated into,
+    ``(nf, nc, *cells)``, at raw (every-step, unit-weight) scale. For each
+    frequency the estimate is
+
+        eta(w) = ||fields|| / (|1 - exp(i w dt)| * ||phasors(w)||),
+
+    the size of the geometric tail ``sum_{n >= T} exp(i w n dt) E_n`` the DFT is
+    missing if the remaining field neither decayed nor oscillated, relative to
+    the recorded phasor. It costs two norms of arrays already in memory, no
+    extra state. It is an estimate, not a bound: a field still ringing at ``w``
+    leaves a longer tail than this, a decaying one a shorter one.
+
+    Frequencies whose phasor is below ``rel_floor`` times the largest are left
+    out: an adjoint excitation with no cotangent at some frequency has no phasor
+    there to converge.
+
+    Returns:
+        The largest ``eta(w)`` over the kept frequencies (0 where no field is left).
+    """
+    w = jnp.asarray(np.asarray(angular_frequencies, dtype=np.float64))
+    per_freq = jnp.sqrt(jnp.sum(jnp.abs(phasors.reshape(phasors.shape[0], -1)) ** 2, axis=1))
+    left = jnp.sqrt(jnp.sum(jnp.abs(fields) ** 2))
+    gap = jnp.abs(1.0 - jnp.exp(1j * w * dt)).astype(per_freq.dtype)
+    kept = per_freq >= rel_floor * jnp.max(per_freq)
+    tiny = jnp.finfo(per_freq.dtype).tiny
+    eta = jnp.where(kept, left / (gap * jnp.maximum(per_freq, tiny)), 0.0)
+    return jnp.max(eta)
+
+
+def uncovered_device_cells(
+    objects: ObjectContainer,
+    region_slices: Sequence[Sequence[tuple[int, int]]],
+) -> list[tuple[str, int, int]]:
+    """Devices with cells outside every design region.
+
+    The reciprocity gradient is zero outside the design regions by construction,
+    so a Device cell no region covers gets a zero gradient instead of its true
+    one, and every parameter ``apply_params`` maps onto it loses that part.
+
+    Returns:
+        ``[(device_name, uncovered_cells, device_cells), ...]`` for each Device
+        with at least one uncovered cell.
+    """
+    out = []
+    for dev in objects.devices:
+        lo = [int(a) for a, _ in dev.grid_slice_tuple]
+        hi = [int(b) for _, b in dev.grid_slice_tuple]
+        covered = np.zeros(tuple(h - lo_ for lo_, h in zip(lo, hi)), dtype=bool)
+        for region in region_slices:
+            box = []
+            for axis, (r_lo, r_hi) in enumerate(region):
+                a, b = max(int(r_lo), lo[axis]), min(int(r_hi), hi[axis])
+                if a >= b:
+                    break
+                box.append(slice(a - lo[axis], b - lo[axis]))
+            else:
+                covered[tuple(box)] = True
+        missing = int(covered.size - covered.sum())
+        if missing:
+            out.append((str(dev.name), missing, int(covered.size)))
+    return out
+
+
+def describe_uncovered(uncovered: Sequence[tuple[str, int, int]], design: Any) -> str:
+    """One sentence naming the Devices :func:`uncovered_device_cells` found."""
+    parts = ", ".join(f"{name!r} ({missing} of {total} cells)" for name, missing, total in uncovered)
+    return f"The design region {design!r} does not cover every Device: {parts} lie outside it."
+
+
 def make_reciprocity_phasor_fn(
     forward_arrays: ArrayContainer,
     forward_objects: ObjectContainer,
@@ -327,8 +508,9 @@ def make_reciprocity_phasor_fn(
     design_detector: str | Sequence[str] | None,
     adjoint_sources: Sequence[Sequence[str]],
     window: jax.Array | None = None,
-    cond_limit: float = 1e8,
-) -> Callable[[jax.Array], Any]:
+    cond_limit: float = DEFAULT_COND_LIMIT,
+    tail_tolerance: float | None = DEFAULT_TAIL_TOLERANCE,
+) -> ReciprocityPhasorFn:
     """Build a differentiable phasor function backed by a reciprocity gradient.
 
     Several objective monitors cost **one** adjoint solve, not one each: their
@@ -369,7 +551,14 @@ def make_reciprocity_phasor_fn(
         window: adjoint excitation envelope; defaults to
             :func:`gaussian_window` over the full run.
         cond_limit: conditioning ceiling for the amplitude solve, checked here so
-            a bad window fails at setup rather than inside the VJP.
+            a bad window fails at setup rather than inside the VJP. The default,
+            :data:`~fdtdx.adjoint.reciprocity.DEFAULT_COND_LIMIT`, keeps the
+            float32 solve error near 1e-4 (see there for the measurements).
+        tail_tolerance: warn (:class:`ConvergenceWarning`, once per function)
+            when the DFT truncation estimate :func:`dft_tail` of the objective
+            phasors, or of the forward or adjoint design phasors, exceeds this.
+            ``None`` disables the check. The estimates of the latest call are in
+            ``phasor_fn.diagnostics`` either way.
 
     Returns:
         ``phasor_fn(inv_permittivities)``. For one plain monitor it returns that
@@ -377,12 +566,21 @@ def make_reciprocity_phasor_fn(
         whose entries are a phasor array for a plain monitor and the full state
         dict for a box projection detector. Feed a box dict straight to the
         detector's own projection, which is pure JAX, and the gradient follows.
+        ``phasor_fn.diagnostics`` is a dict with the amplitude-solve ``cond``
+        and, filled in by every call (a host callback, so also under ``jit``),
+        ``objective_tail`` and ``forward_design_tail`` (forward solve) and
+        ``adjoint_design_tail`` (backward solve): name -> :func:`dft_tail`.
 
     Raises:
         NotImplementedError: for an unsupported objective configuration, or a
             frozen source overlapping a design region.
         ValueError: on missing objects, mismatched names or frequencies, or an
             ill-conditioned amplitude solve.
+
+    Warns:
+        UserWarning: when an explicitly named design region leaves cells of a
+            ``Device`` uncovered; the gradient there is zero, not the true one.
+        ConvergenceWarning: see ``tail_tolerance``.
     """
     single = isinstance(objective_detectors, str)
     det_names = (objective_detectors,) if single else tuple(objective_detectors)
@@ -433,6 +631,18 @@ def make_reciprocity_phasor_fn(
                 f"design region {d_f.name!r} differs between scenes: forward {d_f.grid_slice_tuple} vs "
                 f"adjoint {d_a.grid_slice_tuple}"
             )
+    if design_detector is not None:
+        uncovered = uncovered_device_cells(forward_objects, [d.grid_slice_tuple for d in des_dets])
+        if uncovered:
+            warnings.warn(
+                describe_uncovered(uncovered, design_detector)
+                + " The returned gradient is exactly zero on those cells, not the true gradient, so a "
+                "parameter gradient through apply_params is silently truncated (measured: rel 8.0e-01 "
+                "for a region one cell short of the Device, 7.0e-01 with a second Device left out). "
+                "Leave design_detector=None to use every Device.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     omegas = tuple(float(w) for w in obj_dets[0]._angular_frequencies)
     dt = float(config.time_step_duration)
@@ -441,8 +651,9 @@ def make_reciprocity_phasor_fn(
 
     # Flatten every objective detector into channels (one per stored phasor array),
     # each with the transpose of what it records and one adjoint current per block
-    # of that transpose's support.
-    channels: list[tuple[int, ChannelRecording, tuple[int, ...]]] = []  # (detector, recording, source indices)
+    # of that transpose's support, and FDTDX's lossy divisor on each block.
+    # (detector, recording, source indices, lossy divisor per block)
+    channels: list[tuple[int, ChannelRecording, tuple[int, ...], tuple[_LossyInjection | None, ...]]] = []
     returns_dict: list[bool] = []
     for d_i, (name, det, group) in enumerate(zip(det_names, obj_dets, src_groups)):
         chans = detector_channels(det, name)
@@ -466,6 +677,7 @@ def make_reciprocity_phasor_fn(
         names_iter = iter(group)
         for rec in recordings:
             indices = []
+            losses = []
             for block in rec.blocks:
                 src_name = next(names_iter)
                 src = _find(adj_objects.sources, src_name, "source")
@@ -486,7 +698,10 @@ def make_reciprocity_phasor_fn(
                 indices.append(
                     next(i for i, o in enumerate(adj_objects.object_list) if getattr(o, "name", None) == src_name)
                 )
-            channels.append((d_i, rec, tuple(indices)))
+                # the arrays the adjoint solve runs on, whose conductivity the
+                # current is injected into
+                losses.append(_lossy_injection(adj_arrays, courant, block, stored))
+            channels.append((d_i, rec, tuple(indices), tuple(losses)))
         # more than one state key means the caller receives the whole dict and
         # applies the detector's own readout to it
         returns_dict.append(len(chans) > 1)
@@ -506,11 +721,20 @@ def make_reciprocity_phasor_fn(
     if not np.isfinite(cond) or cond > cond_limit:
         raise ValueError(
             f"Adjoint amplitude solve is ill-conditioned (cond={cond:.3e} > {cond_limit:.1e}). "
-            "Widen the window's sigma_frac, lengthen the simulation, or space the objective "
-            "frequencies further apart."
+            "The window is too short to separate the objective frequencies: the adjoint current "
+            "then cancels itself out and the gradient is garbage (measured on the colour splitter: "
+            "rel 20 at cond 7.2e7, 0.78 at 3.5e4). Lengthen the simulation, widen the window's "
+            "sigma_frac, or space the objective frequencies further apart."
         )
     A = jnp.asarray(A_np)
     nf = len(omegas)
+    diagnostics: dict[str, Any] = {
+        "cond": cond,
+        "tail_tolerance": tail_tolerance,
+        "objective_tail": {},
+        "forward_design_tail": {},
+        "adjoint_design_tail": {},
+    }
 
     # PhasorDetector multiplies every recorded sample by _static_scale(): 1 in
     # "pulse" mode, 2/sum(window) in "continuous", which is its default. The kernel
@@ -560,7 +784,7 @@ def make_reciprocity_phasor_fn(
     half_step = -np.exp(-1j * w_np * dt / 2.0)
     time_average = (1.0 + np.exp(1j * w_np * dt)) / 2.0
     signs: list[jax.Array] = []
-    for d_i, rec, _indices in channels:
+    for d_i, rec, _indices, _losses in channels:
         det = obj_dets[d_i]
         magnetic_factor = half_step * time_average if rec.exact else half_step
         is_magnetic = np.asarray([c.startswith("H") for c in canonical_components(det)])
@@ -569,6 +793,70 @@ def make_reciprocity_phasor_fn(
         signs.append(jnp.asarray(s).reshape(s.shape + (1,) * ndim_spatial))
 
     des_slices = [d.grid_slice for d in des_dets]
+
+    # Convergence diagnostic: dft_tail of every objective channel (raw scale) and of
+    # the design phasors in both solves, from the fields each solve leaves at its
+    # last step. Reported through a host callback so it also works under jit.
+    channel_labels = [
+        det_names[d_i] if rec.state_key == "phasor" else f"{det_names[d_i]}[{rec.state_key}]"
+        for d_i, rec, _indices, _losses in channels
+    ]
+    warned: set[str] = set()
+
+    def _report(stage: str, labels: tuple[str, ...], values) -> None:
+        tails = {label: float(v) for label, v in zip(labels, values)}
+        diagnostics[stage] = tails
+        if tail_tolerance is None or stage in warned:
+            return
+        worst = max(tails, key=lambda k: tails[k])
+        if tails[worst] > tail_tolerance:
+            warned.add(stage)
+            what, meaning = {
+                "objective_tail": (
+                    "objective phasors",
+                    "The returned phasors, and a figure of merit built on them, carry a truncation "
+                    "error of about that size.",
+                ),
+                "forward_design_tail": (
+                    "forward design-region phasors",
+                    "Reciprocity equals the exact gradient only once both solves have converged; on "
+                    "the colour splitter the gradient error was 2-5x the larger design-region estimate.",
+                ),
+                "adjoint_design_tail": (
+                    "adjoint design-region phasors",
+                    "Reciprocity equals the exact gradient only once both solves have converged; on "
+                    "the colour splitter the gradient error was 2-5x the larger design-region estimate "
+                    "(1.46 at 22 fs, where it was rel 20).",
+                ),
+            }[stage]
+            warnings.warn(
+                f"The {what} have not converged: DFT tail estimate {tails[worst]:.2e} for {worst!r} "
+                f"exceeds tail_tolerance={tail_tolerance:.1e} (all: "
+                + ", ".join(f"{k}={v:.2e}" for k, v in tails.items())
+                + f"). {meaning} Lengthen the simulation so the fields leave the domain (see dft_tail); "
+                "pass tail_tolerance=None to silence this.",
+                ConvergenceWarning,
+                stacklevel=2,
+            )
+
+    def _stored_fields(fields, components: tuple[str, ...], cells) -> jax.Array:
+        E, H = fields.E, fields.H
+        index = tuple(slice(int(lo), int(hi)) for lo, hi in cells)
+        return jnp.stack([(E if FAMILY_AXIS[c][0] == 0 else H)[FAMILY_AXIS[c][1]][index] for c in components])
+
+    def _forward_tails(out):
+        objective = []
+        for d_i, rec, _indices, _losses in channels:
+            det = obj_dets[d_i]
+            phasors = out.detector_states[det_names[d_i]][rec.state_key][0] / s_m_per_det[d_i]
+            left = _stored_fields(out.fields, canonical_components(det), rec.channel_slice)
+            objective.append(dft_tail(left, phasors, omegas, dt))
+        design = [
+            dft_tail(out.fields.E[:, *sl], out.detector_states[n]["phasor"][0], omegas, dt)
+            for n, sl in zip(des_names, des_slices)
+        ]
+        jax.debug.callback(partial(_report, "objective_tail", tuple(channel_labels)), tuple(objective))
+        jax.debug.callback(partial(_report, "forward_design_tail", tuple(des_names)), tuple(design))
 
     def _solve_amplitudes(target: jax.Array, sign: jax.Array) -> jax.Array:
         """Trace-safe solve_adjoint_amplitudes with the matrix precomputed."""
@@ -582,6 +870,7 @@ def make_reciprocity_phasor_fn(
     def _forward(inv_eps: jax.Array):
         arrays = fwd_arrays.aset("inv_permittivities", inv_eps)
         _, out = checkpointed_fdtd(arrays, fwd_objects, config, key, show_progress=False)
+        _forward_tails(out)
         outs = []
         for name, wants_dict in zip(det_names, returns_dict):
             state = out.detector_states[name]
@@ -601,19 +890,27 @@ def make_reciprocity_phasor_fn(
         # Build the adjoint container HERE, not in a closure: closing over a
         # traced source leaf is what raises UnexpectedTracerError.
         new_list = list(adj_objects.object_list)
-        for (d_i, rec, indices), sign in zip(channels, signs):
+        for (d_i, rec, indices, losses), sign in zip(channels, signs):
             ct_det = ct[d_i]
             ct_one = ct_det[rec.state_key] if isinstance(ct_det, dict) else ct_det
             # Cotangent on the recorded values -> cotangent on the raw Yee fields
             # the adjoint current drives: the identity for a raw-field monitor, the
             # transposed co-location stencil (and padding) for an exact one.
-            for idx, target in zip(indices, rec.transpose(ct_one[0])):
+            for idx, target, loss in zip(indices, rec.transpose(ct_one[0]), losses):
+                if loss is not None:
+                    # FDTDX adds sources after the lossy division (_LossyInjection)
+                    target = target / loss.divisor(inv_eps)[None]
                 new_list[idx] = new_list[idx].aset("amplitudes", _solve_amplitudes(target, sign))
         objects_a = adj_objects.aset("object_list", new_list)
         arrays_a = adj_arrays.aset("inv_permittivities", inv_eps)
         # One solve for every channel: the adjoint currents superpose, and so do
         # their contributions to the design gradient.
         _, out_a = checkpointed_fdtd(arrays_a, objects_a, config, key, show_progress=False)
+        adjoint_tails = [
+            dft_tail(out_a.fields.E[:, *sl], out_a.detector_states[n]["phasor"][0], omegas, dt)
+            for n, sl in zip(des_names, des_slices)
+        ]
+        jax.debug.callback(partial(_report, "adjoint_design_tail", tuple(des_names)), tuple(adjoint_tails))
 
         grad = jnp.zeros_like(inv_eps)
         for name, F_i, sl, scale_sq in zip(des_names, F, des_slices, s_d_sq):
@@ -633,17 +930,24 @@ def make_reciprocity_phasor_fn(
         return (grad,)
 
     phasor_fn.defvjp(phasor_fwd, phasor_bwd)
+    return ReciprocityPhasorFn(phasor_fn, single=single, diagnostics=diagnostics)
 
-    if single and not returns_dict[0]:
 
-        def single_fn(inv_eps: jax.Array) -> jax.Array:
-            return phasor_fn(inv_eps)[0]
+class ReciprocityPhasorFn:
+    """``phasor_fn(inv_permittivities) -> phasors``, from :func:`make_reciprocity_phasor_fn`.
 
-        return single_fn
-    if single:
+    Attributes:
+        diagnostics: ``cond`` of the amplitude solve and the :func:`dft_tail`
+            estimates of the latest forward (``objective_tail``,
+            ``forward_design_tail``) and backward (``adjoint_design_tail``) solve,
+            each a dict name -> value. Updated by every call, including under ``jit``.
+    """
 
-        def single_dict_fn(inv_eps: jax.Array):
-            return phasor_fn(inv_eps)[0]
+    def __init__(self, fn: Callable[[jax.Array], tuple[Any, ...]], *, single: bool, diagnostics: dict[str, Any]):
+        self._fn = fn
+        self._single = single
+        self.diagnostics = diagnostics
 
-        return single_dict_fn
-    return phasor_fn
+    def __call__(self, inv_permittivities: jax.Array) -> Any:
+        out = self._fn(inv_permittivities)
+        return out[0] if self._single else out

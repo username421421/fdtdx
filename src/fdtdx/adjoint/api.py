@@ -30,13 +30,19 @@ are applied once, at setup, exactly as ``apply_params`` would
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Callable
+from typing import Any
 
 import jax
 
-from fdtdx.adjoint.reciprocity import gaussian_window
-from fdtdx.adjoint.scene import derive_adjoint_objects, find_object
-from fdtdx.adjoint.vjp import _slices_overlap, make_reciprocity_phasor_fn
+from fdtdx.adjoint.reciprocity import DEFAULT_COND_LIMIT, DEFAULT_TAIL_TOLERANCE, gaussian_window
+from fdtdx.adjoint.scene import derive_adjoint_objects, design_regions, find_object
+from fdtdx.adjoint.vjp import (
+    ReciprocityPhasorFn,
+    _slices_overlap,
+    describe_uncovered,
+    make_reciprocity_phasor_fn,
+    uncovered_device_cells,
+)
 from fdtdx.config import SimulationConfig
 from fdtdx.core.jax.default_key import default_key
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
@@ -53,8 +59,9 @@ def reciprocity_phasor_fn(
     objective_detectors: str | Sequence[str],
     design_detector: str | Sequence[str] | None = None,
     window: jax.Array | None = None,
-    cond_limit: float = 1e8,
-) -> Callable[[jax.Array], jax.Array | tuple[jax.Array, ...]]:
+    cond_limit: float = DEFAULT_COND_LIMIT,
+    tail_tolerance: float | None = DEFAULT_TAIL_TOLERANCE,
+) -> ReciprocityPhasorFn:
     """Differentiable monitor phasors from a single placed scene.
 
     Args:
@@ -75,14 +82,20 @@ def reciprocity_phasor_fn(
             ``Device`` in the scene. Otherwise the name, or names, of placed
             objects whose cells form the design region: a ``Device``, a detector
             in any configuration (only its cells are used), or a static material
-            block. The returned gradient is nonzero only there.
+            block. The returned gradient is nonzero only there, so a named region
+            that leaves cells of a ``Device`` uncovered warns.
         window: adjoint excitation envelope; defaults to
             :func:`~fdtdx.adjoint.reciprocity.gaussian_window` over the full run.
-        cond_limit: conditioning ceiling for the adjoint amplitude solve.
+        cond_limit: conditioning ceiling for the adjoint amplitude solve
+            (:data:`~fdtdx.adjoint.reciprocity.DEFAULT_COND_LIMIT`).
+        tail_tolerance: warn when the phasors look unconverged
+            (:func:`~fdtdx.adjoint.vjp.dft_tail`); ``None`` disables it.
 
     Returns:
         ``phasor_fn(inv_permittivities) -> phasors``, differentiable, costing two
-        forward solves per gradient.
+        forward solves per gradient. ``phasor_fn.diagnostics`` holds the
+        amplitude-solve condition number and the convergence estimates of the
+        latest call.
     """
     if window is None:
         window = gaussian_window(int(config.time_steps_total), dtype=config.dtype)
@@ -105,6 +118,7 @@ def reciprocity_phasor_fn(
         adjoint_sources=adjoint_sources,
         window=window,
         cond_limit=cond_limit,
+        tail_tolerance=tail_tolerance,
     )
 
 
@@ -118,11 +132,13 @@ class ReciprocityParamFn:
             ``compute_overlap``: in the container ``place_objects`` returned that
             mode is unset whenever the port shares a Device's footprint.
         phasor_fn: the underlying ``phasor_fn(inv_permittivities)``.
+        diagnostics: ``phasor_fn.diagnostics``: amplitude-solve ``cond`` and the
+            convergence estimates of the latest call.
     """
 
     def __init__(
         self,
-        phasor_fn: Callable[[jax.Array], Any],
+        phasor_fn: ReciprocityPhasorFn,
         arrays: ArrayContainer,
         objects: ObjectContainer,
         key: jax.Array,
@@ -135,6 +151,10 @@ class ReciprocityParamFn:
         # the whole scene would re-apply every overlapping object (a mode solve per
         # port) on every call, for a result discarded here.
         self._design_objects = ObjectContainer(object_list=[objects.volume, *objects.devices], volume_idx=0)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return self.phasor_fn.diagnostics
 
     def __call__(self, params: Any, **transform_kwargs: Any):
         updated, _, _ = apply_params(self._arrays, self._design_objects, params, self._key, **transform_kwargs)
@@ -150,7 +170,8 @@ def reciprocity_param_fn(
     objective_detectors: str | Sequence[str],
     design_detector: str | Sequence[str] | None = None,
     window: jax.Array | None = None,
-    cond_limit: float = 1e8,
+    cond_limit: float = DEFAULT_COND_LIMIT,
+    tail_tolerance: float | None = DEFAULT_TAIL_TOLERANCE,
 ) -> ReciprocityParamFn:
     """Differentiable monitor phasors as a function of design **parameters**.
 
@@ -169,10 +190,15 @@ def reciprocity_param_fn(
         objective_detectors: monitor name, or a sequence of them.
         design_detector: leave it out: the default, every ``Device`` in the
             scene, is exactly the set of cells ``apply_params`` writes, so the
-            gradient is the full parameter gradient. See
-            :func:`reciprocity_phasor_fn` for the other forms.
+            gradient is the full parameter gradient. A named region must cover
+            every Device cell (it may be larger); one that does not is refused,
+            because the parameters mapped onto the uncovered cells would get a
+            zero gradient instead of theirs. See :func:`reciprocity_phasor_fn`
+            for the forms it takes.
         window: adjoint excitation envelope.
         cond_limit: conditioning ceiling for the amplitude solve.
+        tail_tolerance: convergence warning threshold; see
+            :func:`reciprocity_phasor_fn`.
 
     Returns:
         ``param_fn(params, **transform_kwargs) -> phasors``. Extra keyword
@@ -186,18 +212,32 @@ def reciprocity_param_fn(
         parameter gradient. For an object outside every Device the result is the
         same on every call, which is why applying it once is exact; an object
         whose own cells overlap a Device is refused
-        (:func:`apply_objects_once`).
-
-        Naming a region that does not cover every ``Device`` drops the
-        gradient of the parameters outside it, silently by construction, since
-        the reciprocity gradient is zero outside the design regions.
+        (:func:`apply_objects_once`). ``apply_params`` also zeroes the dispersion
+        coefficients in the Device cells on every call, which is likewise
+        parameter-independent and done once here
+        (:func:`device_dispersion_as_applied`), so a dispersive block under a
+        Device is simulated as ``run_fdtd`` would.
 
     Raises:
         NotImplementedError: if a ``Device`` has a dispersive material (see
             :func:`_reject_dispersive_devices`), or an applied object overlaps
             a Device (see :func:`apply_objects_once`).
+        ValueError: if ``design_detector`` leaves cells of a Device uncovered.
     """
     _reject_dispersive_devices(objects)
+    if design_detector is not None:
+        regions = design_regions(objects, design_detector)
+        uncovered = uncovered_device_cells(objects, [r.grid_slice_tuple for r in regions])
+        if uncovered:
+            raise ValueError(
+                describe_uncovered(uncovered, design_detector)
+                + " The reciprocity gradient is zero outside the design region, so every parameter "
+                "apply_params maps onto those cells would get a zero gradient instead of its own "
+                "(measured before this check: rel 8.0e-01 for a region one cell short of the Device, "
+                "4.6e-01 for one shifted by a cell, 7.0e-01 with a second Device left out). Leave "
+                "design_detector=None, which is every Device, or name regions covering them all."
+            )
+    arrays = device_dispersion_as_applied(arrays, objects)
     applied = apply_objects_once(arrays, objects, key)
     phasor_fn = reciprocity_phasor_fn(
         arrays,
@@ -208,6 +248,7 @@ def reciprocity_param_fn(
         design_detector=design_detector,
         window=window,
         cond_limit=cond_limit,
+        tail_tolerance=tail_tolerance,
     )
     return ReciprocityParamFn(phasor_fn, arrays, applied, key)
 
@@ -289,6 +330,39 @@ def apply_objects_once(
             )
         new_list.append(obj)
     return ObjectContainer(object_list=new_list, volume_idx=objects.volume_idx)
+
+
+def device_dispersion_as_applied(arrays: ArrayContainer, objects: ObjectContainer) -> ArrayContainer:
+    """Write the Devices' dispersion coefficients the way ``apply_params`` does, once.
+
+    ``apply_params`` overwrites ``dispersive_c1..c3`` in every Device's cells
+    whenever the scene has any dispersive material, with the coefficients of the
+    Device's own materials. Those are refused when dispersive
+    (:func:`_reject_dispersive_devices`), so what it writes is zero, whatever the
+    parameters. ``place_objects`` instead leaves the coefficients of a dispersive
+    object *under* a Device in those cells, and the reciprocity solves, which take
+    only ``inv_permittivities`` per call, would keep simulating them: measured on a
+    Lorentz block under an air/silicon Device, forward FoM off by 60% and gradient
+    rel 8.3e-01 at cosine 0.66 against ``run_fdtd``, with nothing raised.
+
+    Args:
+        arrays: the placed arrays.
+        objects: the placed objects.
+
+    Returns:
+        ``arrays`` with the Device cells' ADE coefficients zeroed (unchanged when
+        the scene has no dispersive material).
+    """
+    if arrays.dispersive_c1 is None:
+        return arrays
+    for name in ("dispersive_c1", "dispersive_c2", "dispersive_c3"):
+        value = getattr(arrays, name)
+        if value is None:
+            continue
+        for device in objects.devices:
+            value = value.at[:, :, *device.grid_slice].set(0.0)
+        arrays = arrays.aset(name, value)
+    return arrays
 
 
 def _reject_dispersive_devices(objects: ObjectContainer) -> None:

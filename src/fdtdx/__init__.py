@@ -8,6 +8,7 @@ if sys.version_info >= (3, 15):
         stacklevel=2,
     )
 
+from fdtdx.adjoint import reciprocity_param_fn, reciprocity_phasor_fn
 from fdtdx.colors import Color
 from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.constants import wavelength_to_period
@@ -307,6 +308,8 @@ __all__ = [
     "plot_setup",
     "plot_setup_from_side",
     "private_field",
+    "reciprocity_param_fn",
+    "reciprocity_phasor_fn",
     "resolve_object_constraints",
     "run_fdtd",
     "setup_sparams_simulation",
