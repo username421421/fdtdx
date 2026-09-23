@@ -33,7 +33,7 @@ reimplementation, and JAX differentiates it:
 
 ```python
 fn = reciprocity_phasor_fn(arrays, objects, config, key,
-                           objective_detectors="ff", design_detector="des")
+                           objective_detectors="ff")   # design region: the Device(s)
 
 def loss(inv_eps):
     out = ff.project(fn(inv_eps), theta, phi)

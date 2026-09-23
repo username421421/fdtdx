@@ -12,7 +12,13 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.adjoint import derive_adjoint_objects, gaussian_window, reciprocity_param_fn, reciprocity_phasor_fn
+from fdtdx.adjoint import (
+    derive_adjoint_objects,
+    design_region_slice,
+    gaussian_window,
+    reciprocity_param_fn,
+    reciprocity_phasor_fn,
+)
 from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.constants import c as c0
 from fdtdx.core.grid import UniformGrid
@@ -65,7 +71,29 @@ def _narrowband_dipole(name, cell):
     return src, src.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=cell)
 
 
-def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC, components=("Ez",)):
+def _scene(
+    sim_fs=150.0,
+    *,
+    with_device=False,
+    sigma=0.0,
+    source_cell=_SRC,
+    components=("Ez",),
+    mon_scaling="pulse",
+    mon2_scaling=None,
+    design_detector_kwargs=None,
+    devices=None,
+):
+    """24^3 test scene.
+
+    ``design_detector_kwargs`` is forwarded to the ``"des"`` PhasorDetector over
+    the design region; ``{}`` leaves it at PhasorDetector's stock defaults, and
+    ``None`` uses the configuration the kernel is calibrated for, which is what
+    every test had to write out before the design detector became internal.
+    ``devices`` is a list of ``(name, lower_corner, shape)`` replacing the single
+    ``"design"`` Device; ``mon2_scaling`` adds a second monitor ``"mon2"``.
+    """
+    if devices is None and with_device:
+        devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
     config = SimulationConfig(
         time=sim_fs * 1e-15,
         grid=UniformGrid(spacing=_RES),
@@ -81,16 +109,17 @@ def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC, comp
     objs.extend(bd.values())
     cons.extend(cl)
 
-    if with_device:
-        device = fdtdx.Device(
-            name="design",
-            partial_grid_shape=(_DES_SPAN,) * 3,
-            partial_voxel_grid_shape=(1, 1, 1),
-            materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
-            param_transforms=[],
-        )
-        cons.append(device.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
-        objs.append(device)
+    if devices:
+        for name, lower, shape in devices:
+            device = fdtdx.Device(
+                name=name,
+                partial_grid_shape=shape,
+                partial_voxel_grid_shape=(1, 1, 1),
+                materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+                param_transforms=[],
+            )
+            cons.append(device.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+            objs.append(device)
     else:
         block = fdtdx.UniformMaterialObject(
             name="block",
@@ -109,8 +138,8 @@ def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC, comp
         name="mon",
         partial_grid_shape=(1, 1, 1),
         wave_characters=wcs,
-        components=("Ez",),
-        scaling_mode="pulse",
+        components=components,
+        scaling_mode=mon_scaling,
         dft_subsample=1,
         exact_interpolation=False,
         reduce_volume=False,
@@ -118,21 +147,66 @@ def _scene(sim_fs=150.0, *, with_device=False, sigma=0.0, source_cell=_SRC, comp
     )
     cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=_MON))
     objs.append(mon)
+    if mon2_scaling is not None:
+        mon2 = fdtdx.PhasorDetector(
+            name="mon2",
+            partial_grid_shape=(1, 1, 1),
+            wave_characters=wcs,
+            components=("Ez",),
+            scaling_mode=mon2_scaling,
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
+        mon2_cell = (_MON[0], _MON[1] + 2, _MON[2])
+        cons.append(mon2.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=mon2_cell))
+        objs.append(mon2)
+    if design_detector_kwargs is None:
+        design_detector_kwargs = dict(
+            components=("Ex", "Ey", "Ez"),
+            scaling_mode="pulse",
+            dft_subsample=1,
+            exact_interpolation=False,
+            reduce_volume=False,
+            dtype=jnp.complex128,
+        )
     des = fdtdx.PhasorDetector(
         name="des",
         partial_grid_shape=(_DES_SPAN,) * 3,
-        wave_characters=wcs,
-        components=("Ex", "Ey", "Ez"),
-        scaling_mode="pulse",
-        dft_subsample=1,
-        exact_interpolation=False,
-        reduce_volume=False,
-        dtype=jnp.complex128,
+        **{"wave_characters": wcs, **design_detector_kwargs},
     )
     cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
     objs.append(des)
 
     return fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
+
+
+def _rel_cos(a, b):
+    rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+    cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
+    return rel, cos
+
+
+def _official_inv_eps_grad(objects, arrays, config, readout):
+    cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+    def official(ie):
+        _, out = fdtdx.run_fdtd(arrays.aset("inv_permittivities", ie), objects, cfg_ck, _KEY, show_progress=False)
+        return readout(out.detector_states)
+
+    return jax.value_and_grad(official)(arrays.inv_permittivities)
+
+
+def _official_param_grad(objects, arrays, params, config):
+    cfg_ck = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+
+    def official(p):
+        arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+        _, out = fdtdx.run_fdtd(arrs, objs, cfg_ck, _KEY, show_progress=False)
+        return _FOM(out.detector_states["mon"]["phasor"])
+
+    return jax.value_and_grad(official)(params)
 
 
 def _FOM(P):
@@ -345,6 +419,15 @@ class TestMagneticComponents:
     stores the post-update H (living at n+1/2) but weights it with the
     integer-step kernel. Measured on an Hx objective: no factor 1.91 at cosine
     -0.998, sign flip alone 1.04e-01, both 6.3e-07 at cosine 1.000000000.
+
+    Until the ``_scene`` fix that came with this docstring, ``components`` was
+    accepted by ``_scene`` but never passed to the monitor, so every case here
+    silently tested ``("Ez",)``.
+
+    ``("Hx", "Ez")`` is declared out of order on purpose. PhasorDetector stores
+    components in canonical order whatever order they are declared in, and the
+    adjoint current used to follow the declared order, driving each cotangent
+    into the other component.
     """
 
     @pytest.mark.parametrize(
@@ -354,9 +437,10 @@ class TestMagneticComponents:
             ("Hx",),
             ("Hy",),
             ("Ez", "Hx"),
+            ("Hx", "Ez"),
             ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
         ],
-        ids=["Ez", "Hx", "Hy", "Ez_Hx", "all_six"],
+        ids=["Ez", "Hx", "Hy", "Ez_Hx", "Hx_Ez_declared_out_of_order", "all_six"],
     )
     def test_matches_checkpointed_for_any_component_set(self, components):
         objects, arrays, _, config, _ = _scene(components=components)
@@ -378,6 +462,8 @@ class TestMagneticComponents:
             window=window,
         )
         ie = arrays.inv_permittivities
+        mon = next(d for d in objects.detectors if d.name == "mon")
+        assert set(mon.components) == set(components), "the scene must actually use these components"
         g_off = jax.grad(official)(ie)
         g_rec = jax.grad(lambda x: _FOM(fn(x)))(ie)
         gs = next(d for d in objects.detectors if d.name == "des").grid_slice
@@ -733,13 +819,21 @@ class TestFluxAndEnergyObjectives:
             )
 
 
-class TestSilentMisconfiguration:
-    """Detector settings whose wrong value produced a wrong gradient, not an error.
+_E3 = dict(
+    components=("Ex", "Ey", "Ez"),
+    dft_subsample=1,
+    exact_interpolation=False,
+    reduce_volume=False,
+    dtype=jnp.complex128,
+)
 
-    Both of these are :class:`PhasorDetector`'s own defaults, so anyone building a
-    design-region detector without copying an example hit them. Measured against
-    ``run_fdtd(GradientConfig(checkpointed))`` on a 24^3 scene before the guards
-    existed:
+
+class TestDetectorDefaults:
+    """PhasorDetector's stock defaults give the right gradient, with no setup.
+
+    Two of those defaults used to be silently wrong for the design detector, and
+    were then refused. Measured against ``run_fdtd(GradientConfig(checkpointed))``
+    on this 24^3 scene before any guard existed:
 
     ============================  ==========  ========
     design detector                 rel L2     cosine
@@ -749,119 +843,156 @@ class TestSilentMisconfiguration:
     ("Ex","Ey","Ez") + continuous   1.00       1.00000
     ============================  ==========  ========
 
-    The six-component case points the gradient backwards. The continuous case is a
-    pure scale error, which an optimizer taking normalized steps would never
-    notice. Neither raised. These tests keep them raising.
+    The design detector is now internal (built by
+    ``fdtdx.adjoint.scene.make_design_detector``), so the user's one is only used
+    for its cells, and the monitor's scale is divided out of the adjoint target.
+    Every assertion is on relative L2: all the scaling errors this guards against
+    had cosine 1.0000000000.
     """
 
-    def _placed(self, components, scaling):
-        config = SimulationConfig(
-            time=60e-15,
-            grid=UniformGrid(spacing=_RES),
-            backend="cpu",
-            dtype=jnp.float64,
-            courant_factor=0.99,
-            gradient_config=None,
-        )
-        objs, cons = [], []
-        vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
-        objs.append(vol)
-        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
-        objs.extend(bd.values())
-        cons.extend(cl)
-        src, constraint = _narrowband_dipole("src", (_PML + 1, _N // 2, _N // 2))
-        cons.append(constraint)
-        objs.append(src)
-        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
-        mon = fdtdx.PhasorDetector(
-            name="mon",
-            partial_grid_shape=(1, 1, 1),
-            wave_characters=wcs,
-            components=("Ez",),
-            scaling_mode="pulse",
-            dft_subsample=1,
-            exact_interpolation=False,
-            reduce_volume=False,
-            dtype=jnp.complex128,
-        )
-        cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=_MON))
-        objs.append(mon)
-        des = fdtdx.PhasorDetector(
-            name="des",
-            partial_grid_shape=(_DES_SPAN,) * 3,
-            wave_characters=wcs,
-            components=components,
-            scaling_mode=scaling,
-            dft_subsample=1,
-            exact_interpolation=False,
-            reduce_volume=False,
-            dtype=jnp.complex128,
-        )
-        cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
-        objs.append(des)
-        o, a, _p, cfg, _ = fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
-        a, o, _ = apply_params(a, o, _p, _KEY)
-        return o, a, cfg
+    def test_stock_default_design_detector_matches_official(self):
+        """A design detector given nothing but a name, a shape and frequencies."""
+        objects, arrays, params, config, _ = _scene(with_device=True, design_detector_kwargs={})
+        des = next(d for d in objects.detectors if d.name == "des")
+        assert len(des.components) == 6 and des.scaling_mode == "continuous" and des.exact_interpolation
 
-    def test_six_component_design_detector_is_refused(self):
-        """PhasorDetector's default. Summing H into the contraction gave cosine -0.473."""
-        objects, arrays, config = self._placed(("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"), "pulse")
-        window = gaussian_window(int(config.time_steps_total))
-        with pytest.raises(NotImplementedError, match="must record exactly"):
-            reciprocity_phasor_fn(
-                arrays,
-                objects,
-                config,
-                _KEY,
-                objective_detectors="mon",
-                design_detector="des",
-                window=window,
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="des")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12), "forward values must be identical"
+        rel, cos = _rel_cos(_flat(g_rec), _flat(g_off))
+        assert rel < 1e-5, f"stock-default design detector: rel_L2 = {rel:.3e}"
+        # Device parameters are float32 (Device.init_params), so the cosine carries
+        # float32 round-off (1 - 1.2e-07 measured); rel_L2 above is the real gate.
+        assert cos > 1 - 1e-6, f"cosine {cos:.10f}"
+        # the caller's own detector is untouched, so their run_fdtd still records six components
+        assert arrays.detector_states["des"]["phasor"].shape[2] == 6
+
+    @pytest.mark.parametrize("mon_scaling", ["pulse", "continuous"])
+    def test_every_scaling_mode_combination_matches_official(self, mon_scaling):
+        """The 2x2 table of monitor x design-detector scaling_mode.
+
+        Measured before the scale correction (with the refusal removed): 1.0,
+        7.9e+02 and 9.99e-01 relative error for the three non-pulse cells.
+        """
+        ref = None
+        for des_scaling in ("pulse", "continuous"):
+            objects, arrays, _, config, _ = _scene(
+                mon_scaling=mon_scaling, design_detector_kwargs=dict(_E3, scaling_mode=des_scaling)
             )
+            if ref is None:
+                ref = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
+            v_off, g_off = ref
+            fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="des")
+            v_rec, g_rec = jax.value_and_grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
+            assert jnp.allclose(v_rec, v_off, rtol=1e-12)
+            gs = design_region_slice(objects, "des")
+            rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
+            assert rel < 1e-5, f"monitor {mon_scaling}, design {des_scaling}: rel_L2 = {rel:.3e}"
 
-    def test_continuous_scaling_mode_is_refused(self):
-        """PhasorDetector's default. A pure scale error at cosine 1.0, invisible to an optimizer."""
-        objects, arrays, config = self._placed(("Ex", "Ey", "Ez"), "continuous")
-        window = gaussian_window(int(config.time_steps_total))
-        with pytest.raises(NotImplementedError, match="scaling_mode"):
-            reciprocity_phasor_fn(
-                arrays,
-                objects,
-                config,
-                _KEY,
-                objective_detectors="mon",
-                design_detector="des",
-                window=window,
-            )
+    def test_monitors_in_different_modes_each_get_their_own_scale(self):
+        """The monitor scale must be per detector: no global factor fits both.
 
-    def test_helpers_produce_an_accepted_configuration(self):
-        """The supported settings should be the easy ones to get."""
-        from fdtdx.adjoint import design_phasor_detector, objective_phasor_detector
+        Before the fix this case measured rel 1.0 at cosine 0.99999994 -- one
+        monitor dominates the FoM, so a cosine check would have passed it.
+        """
+        objects, arrays, _, config, _ = _scene(mon_scaling="pulse", mon2_scaling="continuous")
 
-        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
-        des = design_phasor_detector(
-            name="des",
-            wave_characters=wcs,
-            partial_grid_shape=(_DES_SPAN,) * 3,
-            dtype=jnp.complex128,
+        def fom(p1, p2):
+            return -jnp.sum(jnp.abs(p1) ** 2) + 0.5 * jnp.sum(jnp.real(p2) ** 2)
+
+        v_off, g_off = _official_inv_eps_grad(
+            objects, arrays, config, lambda s: fom(s["mon"]["phasor"], s["mon2"]["phasor"])
         )
-        mon = objective_phasor_detector(
-            name="mon",
-            wave_characters=wcs,
-            components=("Ez",),
-            partial_grid_shape=(1, 1, 1),
-            dtype=jnp.complex128,
+        fn = reciprocity_phasor_fn(
+            arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"), design_detector="block"
         )
-        assert tuple(des.components) == ("Ex", "Ey", "Ez")
-        assert des.scaling_mode == "pulse" and mon.scaling_mode == "pulse"
-        assert not des.exact_interpolation and not mon.exact_interpolation
-        assert not des.reduce_volume and not mon.reduce_volume
-        assert des.dft_subsample == 1 and mon.dft_subsample == 1
+        v_rec, g_rec = jax.value_and_grad(lambda x: fom(*fn(x)))(arrays.inv_permittivities)
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12)
+        gs = design_region_slice(objects, "block")
+        rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
+        assert rel < 1e-5, f"mixed-mode monitors: rel_L2 = {rel:.3e}"
 
-    def test_helpers_refuse_to_be_overridden(self):
-        from fdtdx.adjoint import design_phasor_detector
+    def test_design_scale_is_divided_out_twice(self, monkeypatch):
+        """Exercise the 1/(s_d_fwd * s_d_adj) path, dead while the internal detector is pulse.
 
-        wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
-        with pytest.raises(ValueError, match="Cannot override"):
-            design_phasor_detector(name="d", wave_characters=wcs, scaling_mode="continuous")
-        with pytest.raises(ValueError, match="Cannot override"):
-            design_phasor_detector(name="d", wave_characters=wcs, reduce_volume=True)
+        With a continuous internal design detector the design scale rides on both
+        the forward and the adjoint phasors; dividing it out once instead of
+        twice would leave a factor 1/s_d = 787 here.
+        """
+        from fdtdx.adjoint import scene as adj_scene
+
+        monkeypatch.setitem(adj_scene.DESIGN_DETECTOR_SETTINGS, "scaling_mode", "continuous")
+        objects, arrays, _, config, _ = _scene(mon_scaling="continuous")
+        block = next(o for o in objects.object_list if o.name == "block")
+        mon = next(d for d in objects.detectors if d.name == "mon")
+        probe = adj_scene.make_design_detector(block, mon.wave_characters, config, _KEY)
+        assert float(probe._static_scale()) < 1e-2, "the design scale path is not being exercised"
+
+        _, g_off = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
+        fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block")
+        g_rec = jax.grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
+        gs = design_region_slice(objects, "block")
+        rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
+        assert rel < 1e-5, f"continuous internal design detector: rel_L2 = {rel:.3e}"
+
+
+class TestAutoDesignRegion:
+    """No design detector at all: the design region is every Device in the scene."""
+
+    @pytest.mark.integration
+    def test_defaults_match_official_pipeline(self):
+        """The whole zero-setup path in one test, cheap enough for CI.
+
+        ``design_detector`` omitted, the monitor in PhasorDetector's default
+        ``scaling_mode="continuous"``, and a stock-default detector over the
+        design region left in the scene (it is dropped from both solves).
+        Parameter gradient through ``apply_params`` against ``run_fdtd``.
+        """
+        objects, arrays, params, config, _ = _scene(
+            with_device=True, mon_scaling="continuous", design_detector_kwargs={}
+        )
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+
+        assert jax.tree_util.tree_structure(g_rec) == jax.tree_util.tree_structure(g_off)
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12), "forward values must be identical"
+        a, b = _flat(g_rec), _flat(g_off)
+        rel, cos = _rel_cos(a, b)
+        sign = float((jnp.sign(a) == jnp.sign(b)).mean())
+        assert rel < 1e-5, f"parameter gradient rel_L2 = {rel:.3e}"
+        assert cos > 1 - 1e-6, f"cosine {cos:.10f}"  # float32 parameters, see above
+        assert sign > 0.99, f"sign agreement {sign:.4f}"
+
+    def test_every_device_gets_its_own_design_region(self):
+        """Two Devices: one internal design detector each, both gradients right.
+
+        Naming one Device restricts the gradient to it, so the other's is zero.
+        """
+        half = _DES_SPAN // 2
+        devices = [
+            ("dA", (_DES_LO, _DES_LO, _DES_LO), (_DES_SPAN, half, _DES_SPAN)),
+            ("dB", (_DES_LO, _DES_LO + half, _DES_LO), (_DES_SPAN, half, _DES_SPAN)),
+        ]
+        objects, arrays, params, config, _ = _scene(devices=devices)
+        _, g_off = _official_param_grad(objects, arrays, params, config)
+
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        g_rec = jax.grad(lambda p: _FOM(param_fn(p)))(params)
+        for name in ("dA", "dB"):
+            rel, _ = _rel_cos(g_rec[name], g_off[name])
+            assert rel < 1e-5, f"auto design regions, device {name}: rel_L2 = {rel:.3e}"
+
+        only_a = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="dA")
+        g_a = jax.grad(lambda p: _FOM(only_a(p)))(params)
+        rel, _ = _rel_cos(g_a["dA"], g_off["dA"])
+        assert rel < 1e-5, f"named device dA: rel_L2 = {rel:.3e}"
+        assert float(jnp.linalg.norm(g_a["dB"])) == 0.0
+        assert float(jnp.linalg.norm(g_off["dB"])) > 0.0
+
+    def test_no_device_and_no_region_raises(self):
+        objects, arrays, _, config, _ = _scene(sim_fs=20.0)
+        with pytest.raises(ValueError, match="no Device"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")

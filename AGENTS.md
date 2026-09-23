@@ -29,10 +29,17 @@ pipeline, and usable for inverse design**.
 from fdtdx.adjoint import reciprocity_param_fn
 
 param_fn = reciprocity_param_fn(arrays, objects, config, key,
-                                objective_detector="mon",
-                                design_detector="design_dft")
+                                objective_detectors="mon")
 value, grad = jax.value_and_grad(lambda p: my_fom(param_fn(p, beta=beta)))(params)
 ```
+
+No design-region detector and no adjoint source are needed in the scene. The
+design region defaults to every `Device`; `design_detector=` optionally names a
+`Device`, a detector (only its cells are used, whatever its configuration) or a
+static block. The detector that records the design-region fields is built
+internally (`fdtdx.adjoint.scene.make_design_detector`) in the one configuration
+the kernel is calibrated for, and every other non-objective detector is dropped
+from both solves. Objective monitors may use either `scaling_mode`.
 
 Parity with `apply_params -> run_fdtd(GradientConfig(checkpointed)) -> jax.grad`,
 same placed scene, gradient with respect to real `Device` parameters:
@@ -49,10 +56,13 @@ Files:
 
 * `src/fdtdx/objects/sources/adjoint.py` — `AdjointCurrentSource`
 * `src/fdtdx/adjoint/reciprocity.py` — window, amplitude solve, gradient kernel
-* `src/fdtdx/adjoint/scene.py` — `derive_adjoint_objects`
+* `src/fdtdx/adjoint/scene.py` — `derive_adjoint_objects`, `internal_scene`,
+  `make_design_detector`
 * `src/fdtdx/adjoint/vjp.py` — the `jax.custom_vjp`
 * `src/fdtdx/adjoint/api.py` — `reciprocity_param_fn`, `reciprocity_phasor_fn`
-* `tests/simulation/adjoint/` — 32 tests, all passing; unit suite unchanged at 2578
+* `tests/simulation/adjoint/` — 46 tests; `tests/unit/adjoint/` — 27 tests. CI
+  (`-m "unit or integration or docs"`) runs all 27 unit tests and one parity
+  test, `TestAutoDesignRegion::test_defaults_match_official_pipeline`.
 
 **Supported:** any differentiable FoM over a plain `PhasorDetector`; **near-to-far
 box projection** via `FieldProjectionAngleDetector`, at 6.4e-07 against
@@ -74,9 +84,13 @@ second-order amount that converges away (1.53e-02 at 12 cells per wavelength,
 3.39e-03 at 24) and leaves the gradient unaffected. Leaving it on raises.
 
 **Not supported:** design-dependent loss (Meep's `MaterialGrid(damping=)`),
-dispersive design regions, `dft_subsample > 1`, `reduce_volume`, the co-location
-transpose, and mode-overlap or diffraction-order detectors. All raise rather
-than approximating.
+dispersive `Device` materials in `reciprocity_param_fn` (the ADE coefficients
+`apply_params` writes were dropped: forward FoM off 15%, gradient rel 0.82; now
+refused), objective monitors whose switch skips time steps (rel up to 8.2e+02;
+now refused), `dft_subsample > 1`, `reduce_volume`, the co-location transpose,
+and mode-overlap or diffraction-order detectors. All raise rather than
+approximating. The raw `inv_permittivities` gradient over a *static* dispersive
+region is fine (5.7e-06).
 
 **Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
 about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is
@@ -216,10 +230,27 @@ FDFD with mode-overlap objectives, and `Metagrating3D` and
   `PhasorDetector.update` is linear in `(E, H)`, so its VJP *is* the transpose
   and it carries `static_scale`, the co-location stencil, the region restriction
   and the H time-average split for free.
-- **v1 must hard-error, not silently approximate,** unless
-  `dft_subsample == 1`, `reduce_volume=False`, `exact_interpolation=False`, and
-  `type(detector) is PhasorDetector`. Box-mode and projection detectors store
-  per-face keys and bypass `PhasorDetector.update`.
+- **v1 must hard-error, not silently approximate,** unless every objective
+  monitor has `dft_subsample` resolving to stride 1, `reduce_volume=False`,
+  `exact_interpolation=False`, no apodization, and a switch that records every
+  time step. Box-mode and projection
+  detectors store per-face keys and bypass `PhasorDetector.update`.
+- **The design detector is not the user's.** Never go back to validating a
+  user-built one: each of its settings was a *silent* error while it was
+  user-facing (six components: cosine -0.473; `continuous`: pure scale at cosine
+  1.0; `inverse=True`: exactly zero; different `wave_characters` from the
+  monitor: rel 0.90). It is built fresh by `scene.make_design_detector`, never by
+  `aset` on an existing detector, because `aset` leaves the `place_on_grid`
+  caches stale (a stale apodization window was a silent rel 0.92).
+- **Scales are divided out, never assumed to be 1.** Each objective monitor's
+  `_static_scale()` multiplies its own adjoint target (per detector: two
+  monitors in different modes admit no single global factor), and the design
+  detectors' forward and adjoint scales divide the assembled gradient. Test it on
+  relative L2, not cosine: every uncorrected case had cosine 1.0000000000.
+- **Adjoint currents follow the stored component order.** `PhasorDetector`
+  stacks components canonically (Ex..Hz) whatever order `components` declares;
+  following the declared order gave rel 1.006 at cosine 0.27 for
+  `components=("Hx", "Ez")`. Use `scene.canonical_components`.
 - **Scenes must decay** to about 1e-8 of peak field before the gradient is
   trusted at 1e-5. Reciprocity equals AD only up to DFT truncation, and the
   error is the product of two truncated transforms.

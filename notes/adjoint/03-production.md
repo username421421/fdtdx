@@ -130,9 +130,8 @@ from fdtdx.adjoint import reciprocity_param_fn
 
 param_fn = reciprocity_param_fn(
     arrays, objects, config, key,
-    objective_detector="mon",      # the monitor the FoM reads
-    design_detector="design_dft",  # a PhasorDetector covering the design region
-)
+    objective_detectors="mon",     # the monitor(s) the FoM reads
+)                                  # design region: every Device in the scene
 
 loss = lambda p: my_fom(param_fn(p, beta=beta))   # any differentiable FoM
 value, grad = jax.value_and_grad(loss)(params)    # grad is a ParameterContainer
@@ -141,6 +140,46 @@ value, grad = jax.value_and_grad(loss)(params)    # grad is a ParameterContainer
 `reciprocity_phasor_fn` is the same thing one level down, differentiating raw
 `inv_permittivities`. `make_reciprocity_phasor_fn` remains as the two-scene
 primitive for callers who genuinely want to control both scenes.
+
+### The design region needs no detector
+
+Earlier versions required a `PhasorDetector` over the design region, configured
+exactly one way, and refused PhasorDetector's own defaults, because each default
+was a silent error: all six components gave rel 3.80 at cosine -0.473,
+`scaling_mode="continuous"` a pure scale error at cosine 1.0. That detector's
+phasors never leave the VJP, so it is now internal. Both solves run on private
+copies of the containers (`scene.internal_scene`) which
+
+* build one design detector per design region with `scene.make_design_detector`,
+  from scratch and freshly placed (`(Ex, Ey, Ez)`, pulse, raw Yee fields, every
+  step, the objective's `wave_characters`, dtype following the simulation);
+* drop every detector whose state is not read: all but the objectives in the
+  forward solve, all of them in the adjoint solve.
+
+`design_detector=None` (the default) means every `Device`. A name may be a
+`Device`, a detector of any configuration or any other placed object: only its
+cells are used. Several regions each get their own detector; where two overlap,
+the gradient is written once, not summed. For `reciprocity_param_fn` the default
+is exactly right, since `apply_params` writes only the Device cells; naming a
+subset of the Devices zeroes the gradient of the others.
+
+Measured on the 24³ float64 scene against `run_fdtd(checkpointed)`, parameter
+gradient: stock-default design detector 9.1e-08, no design detector 1.06e-07,
+two Devices 1.06e-07, monitor at PhasorDetector's default `continuous` scaling
+with no design detector 3.2e-07 (complex64 monitor).
+
+### Scales
+
+`PhasorDetector` multiplies every sample by `_static_scale()`: 1 in pulse mode,
+`2/sum(window)` in continuous mode. The objective monitor's scale `s_m` goes on
+its own adjoint target, because JAX hands the VJP `dL/dP` and the adjoint current
+must reproduce `dL/dP_raw = s_m dL/dP`; it is per detector, since two monitors in
+different modes admit no common factor. The design scale rides on both the
+forward and the adjoint phasors, so the gradient is divided by
+`s_d_fwd * s_d_adj`. With the internal pulse detector that product is 1; it is
+still computed from the placed detectors. All four monitor x design cells, a
+mixed-mode pair of monitors, and a continuous internal design detector (forced by
+monkeypatch) measure 1.169e-06, identical to the pulse/pulse baseline.
 
 Extra keyword arguments to `param_fn` are forwarded to `apply_params`, so a
 continuation schedule such as `beta=` stays live per optimizer step.

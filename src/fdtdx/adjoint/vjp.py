@@ -21,16 +21,21 @@ adjoint-source rules.
     loss = lambda ie: my_fom(phasor_fn(ie))
     value, grad = jax.value_and_grad(loss)(inv_permittivities)
 
+The design region needs no detector. By default it is every
+:class:`~fdtdx.objects.device.device.Device` in the scene; the detector that
+records the fields there is built internally, in the one configuration the
+kernel is calibrated for (:data:`~fdtdx.adjoint.scene.DESIGN_DETECTOR_SETTINGS`).
+Both of PhasorDetector's scaling modes are accepted on the objective monitors.
+
 Restrictions, all enforced with an exception rather than silently approximated:
 
-* ``dft_subsample == 1``, ``reduce_volume=False``, ``exact_interpolation=False``
-  on both detectors, and the objective detector must be exactly a
-  ``PhasorDetector`` (box-mode and projection detectors keep per-face state and
-  bypass ``PhasorDetector.update``).
+* On the objective monitors: ``dft_subsample`` resolving to stride 1,
+  ``reduce_volume=False``, ``exact_interpolation=False``, no apodization, and a
+  switch that records every time step.
 * The design region must not contain a source. FDTDX sources scale their
   injection by the local ``inv_eps``, a term this gradient does not model.
-* The returned gradient is zero outside the design detector's region. That is
-  what inverse design wants, but it is not the full-grid gradient.
+* The returned gradient is zero outside the design regions. That is what
+  inverse design wants, but it is not the full-grid gradient.
 
 Accuracy. Reciprocity is a frequency-domain identity, so it equals the exact
 discrete adjoint only once both DFTs have converged. Measured against
@@ -50,7 +55,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from fdtdx.adjoint.reciprocity import _design_matrix, assemble_material_gradient, gaussian_window
-from fdtdx.adjoint.scene import detector_channels, is_box_projection
+from fdtdx.adjoint.scene import (
+    DESIGN_DETECTOR_SETTINGS,
+    canonical_components,
+    detector_channels,
+    internal_scene,
+    is_box_projection,
+)
 from fdtdx.config import SimulationConfig
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.fdtd import checkpointed_fdtd
@@ -146,19 +157,26 @@ def _validate_objective_detector(det, role: str) -> None:
             f"The {role} detector records {len(det.components)} components; box-mode field "
             "projection concatenates E and H and so needs all six (Ex, Ey, Ez, Hx, Hy, Hz)."
         )
-    if det.scaling_mode != "pulse":
-        raise NotImplementedError(
-            f"The {role} detector has scaling_mode={det.scaling_mode!r}. PhasorDetector defaults "
-            'to "continuous", which multiplies every recorded sample by 2/sum(window) instead of '
-            "1, so the design-region phasors no longer carry the scale the gradient kernel "
-            "assumes. Measured with the default: relative error 1.00 against run_fdtd, at cosine "
-            "1.00000000 -- a pure scale error that an optimizer with normalized steps would not "
-            'notice. Pass scaling_mode="pulse".'
-        )
+    # scaling_mode is not checked: either mode is accepted, and its scale is divided
+    # out of the adjoint target per detector in make_reciprocity_phasor_fn.
     if det.apodization is not None:
         raise NotImplementedError(
             f"The {role} detector has an apodization window. The transpose does not apply it to "
             "the adjoint current, so the gradient would be scaled per time step. Remove it."
+        )
+    # Judged on the switch's own on-list, before any DFT thinning, so a stride
+    # (checked separately) is not mistaken for a restricted switch.
+    cfg = det._config
+    on_list = det.switch.calculate_on_list(
+        num_total_time_steps=cfg.time_steps_total, time_step_duration=cfg.time_step_duration
+    )
+    if not all(on_list):
+        raise NotImplementedError(
+            f"The {role} detector records only {sum(on_list)} of {len(on_list)} time steps (its "
+            "switch). A phasor summed over part of the run is not a frequency-domain quantity, so "
+            "reciprocity does not give its gradient: measured rel 1.8e-01 at cosine 0.984 with "
+            "recording starting at 20 fs of 150 fs, and rel 8.2e+02 at cosine 0.008 starting at "
+            "40 fs, neither raising. Record every time step (the default OnOffSwitch())."
         )
     if det._dft_stride != 1:
         raise NotImplementedError(
@@ -182,31 +200,24 @@ def _validate_objective_detector(det, role: str) -> None:
         )
 
 
-def _validate_design_detector(det) -> None:
-    """The design detector must record exactly the three E components, in order.
+def _check_internal_design_detector(det, config: SimulationConfig) -> None:
+    """Assert the internal design detector is in the configuration the kernel needs.
 
-    ``assemble_material_gradient`` contracts the component axis of
-    ``Lambda * F`` against a scalar ``inv_permittivities``, which is only the
-    right sum when that axis is exactly ``(Ex, Ey, Ez)``.
-    :class:`PhasorDetector` defaults to all six, and summing the magnetic terms
-    in as well does not raise -- it returns a gradient that is simply wrong.
-    Measured against ``run_fdtd`` with the default components: relative error
-    3.80 at cosine **-0.473**, i.e. pointing backwards.
+    The design detectors are built by :func:`~fdtdx.adjoint.scene.make_design_detector`,
+    never by the user, so a failure here is a bug in this package rather than a
+    user error. It is checked anyway because every one of these settings fails
+    silently: see :data:`~fdtdx.adjoint.scene.DESIGN_DETECTOR_SETTINGS`.
     """
-    if is_box_projection(det):
-        raise NotImplementedError(
-            "The design detector must be a plain PhasorDetector, not a field projection detector."
-        )
-    expected = ("Ex", "Ey", "Ez")
-    if tuple(det.components) != expected:
-        raise NotImplementedError(
-            f"The design detector records components {tuple(det.components)}; it must record "
-            f"exactly {expected}, in that order. The gradient kernel contracts the component axis "
-            "against a scalar permittivity, so anything else silently sums the wrong terms: with "
-            "PhasorDetector's default of all six the measured error is 3.80 at cosine -0.473, a "
-            "gradient that points backwards with no error raised. Build it with "
-            "fdtdx.adjoint.design_phasor_detector to get this right by construction."
-        )
+    # The switch is judged by its effect, the on-step count below, not by equality.
+    wrong = {k: getattr(det, k) for k, v in DESIGN_DETECTOR_SETTINGS.items() if k != "switch" and getattr(det, k) != v}
+    if type(det) is not PhasorDetector:
+        wrong["type"] = type(det).__name__
+    if det._dft_stride != 1:
+        wrong["_dft_stride"] = det._dft_stride
+    if det._num_time_steps_on != int(config.time_steps_total):
+        wrong["_num_time_steps_on"] = det._num_time_steps_on
+    if wrong:
+        raise RuntimeError(f"internal design detector {det.name!r} is misconfigured: {wrong}")
 
 
 def make_reciprocity_phasor_fn(
@@ -217,7 +228,7 @@ def make_reciprocity_phasor_fn(
     config: SimulationConfig,
     key: jax.Array,
     objective_detectors: str | Sequence[str],
-    design_detector: str,
+    design_detector: str | Sequence[str] | None,
     adjoint_sources: Sequence[Sequence[str]],
     window: jax.Array | None = None,
     cond_limit: float = 1e8,
@@ -231,10 +242,15 @@ def make_reciprocity_phasor_fn(
     detector storing one phasor array per face and therefore needing one adjoint
     current per face.
 
+    Neither scene needs a design-region detector. Both solves run on private
+    copies of the containers (:func:`~fdtdx.adjoint.scene.internal_scene`) that
+    drop every detector whose state is not needed and add one internally
+    configured design detector per design region.
+
     Args:
         forward_arrays: placed arrays for the forward scene.
-        forward_objects: placed objects, carrying the real source, the objective
-            monitors and a detector covering the design region.
+        forward_objects: placed objects, carrying the real source and the
+            objective monitors.
         adjoint_arrays: placed arrays for the adjoint scene.
         adjoint_objects: placed objects, carrying the adjoint sources and no real
             source. Build it with
@@ -243,7 +259,11 @@ def make_reciprocity_phasor_fn(
         key: PRNG key for both solves.
         objective_detectors: monitor name, or a sequence of them. All must share
             frequencies, since they share one amplitude-solve matrix.
-        design_detector: detector covering the design region.
+        design_detector: where the gradient is taken. ``None`` means every
+            ``Device`` in the scene; otherwise the name, or names, of placed
+            objects whose cells form the design region (a ``Device``, a detector
+            of any configuration, or a static material block). The object must
+            exist in both containers.
         adjoint_sources: for each objective detector, the source names for its
             channels, ordered as :func:`~fdtdx.adjoint.scene.detector_channels`
             returns them.
@@ -260,8 +280,8 @@ def make_reciprocity_phasor_fn(
         detector's own projection, which is pure JAX, and the gradient follows.
 
     Raises:
-        NotImplementedError: for an unsupported detector configuration, or a
-            frozen source overlapping the design region.
+        NotImplementedError: for an unsupported objective configuration, or a
+            frozen source overlapping a design region.
         ValueError: on missing objects, mismatched names or frequencies, or an
             ill-conditioned amplitude solve.
     """
@@ -274,18 +294,43 @@ def make_reciprocity_phasor_fn(
         raise ValueError("at least one objective detector is required")
 
     obj_dets = [_find(forward_objects.detectors, n, "detector") for n in det_names]
-    des_det = _find(forward_objects.detectors, design_detector, "detector")
-    des_det_a = _find(adjoint_objects.detectors, design_detector, "detector")
-
     for name, det in zip(det_names, obj_dets):
         _validate_objective_detector(det, f"objective {name!r}")
-    _validate_objective_detector(des_det, "design")
-    _validate_design_detector(des_det)
-    if des_det.grid_shape != des_det_a.grid_shape:
-        raise ValueError(
-            f"design detector shape differs between scenes: forward {des_det.grid_shape} vs "
-            f"adjoint {des_det_a.grid_shape}"
-        )
+
+    # Private copies of both scenes: objective monitors kept in the forward one
+    # only, since the adjoint run is read at the design region alone, and one
+    # internal design detector per design region added to each.
+    wave_characters = tuple(obj_dets[0].wave_characters)
+    fwd_objects, fwd_arrays, des_names = internal_scene(
+        forward_objects,
+        forward_arrays,
+        config,
+        key,
+        keep_detectors=det_names,
+        design=design_detector,
+        wave_characters=wave_characters,
+    )
+    adj_objects, adj_arrays, des_names_a = internal_scene(
+        adjoint_objects,
+        adjoint_arrays,
+        config,
+        key,
+        keep_detectors=(),
+        design=design_detector,
+        wave_characters=wave_characters,
+    )
+    if des_names != des_names_a:
+        raise ValueError(f"design regions differ between scenes: forward {des_names} vs adjoint {des_names_a}")
+    des_dets = [_find(fwd_objects.detectors, n, "detector") for n in des_names]
+    des_dets_a = [_find(adj_objects.detectors, n, "detector") for n in des_names]
+    for d_f, d_a in zip(des_dets, des_dets_a):
+        _check_internal_design_detector(d_f, config)
+        _check_internal_design_detector(d_a, config)
+        if d_f.grid_slice_tuple != d_a.grid_slice_tuple:
+            raise ValueError(
+                f"design region {d_f.name!r} differs between scenes: forward {d_f.grid_slice_tuple} vs "
+                f"adjoint {d_a.grid_slice_tuple}"
+            )
 
     omegas = tuple(float(w) for w in obj_dets[0]._angular_frequencies)
     dt = float(config.time_step_duration)
@@ -309,16 +354,19 @@ def make_reciprocity_phasor_fn(
                 f"detector {name!r} has frequencies {det_omegas}, expected {omegas}; all objective "
                 "monitors must share frequencies because they share one amplitude solve"
             )
+        # The adjoint current must follow the order the phasors are STORED in,
+        # which is canonical whatever order `components` was declared in.
+        stored = canonical_components(det)
         for (state_key, _slice), src_name in zip(chans, group):
-            src = _find(adjoint_objects.sources, src_name, "source")
+            src = _find(adj_objects.sources, src_name, "source")
             if not isinstance(src, AdjointCurrentSource):
                 raise ValueError(f"{src_name!r} is a {type(src).__name__}, not an AdjointCurrentSource")
-            if tuple(src.components) != tuple(det.components):
+            if tuple(src.components) != stored:
                 raise ValueError(
-                    f"adjoint source {src_name!r} components {tuple(src.components)} must match "
-                    f"detector {name!r}'s {tuple(det.components)}"
+                    f"adjoint source {src_name!r} components {tuple(src.components)} must match the "
+                    f"order detector {name!r} stores its phasors in, {stored}"
                 )
-            idx = next(i for i, o in enumerate(adjoint_objects.object_list) if getattr(o, "name", None) == src_name)
+            idx = next(i for i, o in enumerate(adj_objects.object_list) if getattr(o, "name", None) == src_name)
             channels.append((d_i, state_key, idx))
         # more than one state key means the caller receives the whole dict and
         # applies the detector's own readout to it
@@ -326,12 +374,12 @@ def make_reciprocity_phasor_fn(
 
     # A stock source overlapping the design region would make this kernel disagree
     # with run_fdtd; refuse rather than silently pick a convention.
-    design_slice_tuple = des_det.grid_slice_tuple
-    _reject_frozen_sources_in_design(forward_objects, design_slice_tuple)
     all_src_names = tuple(n for g in src_groups for n in g)
-    _reject_frozen_sources_in_design(adjoint_objects, design_slice_tuple, skip=all_src_names)
+    for des_det in des_dets:
+        _reject_frozen_sources_in_design(forward_objects, des_det.grid_slice_tuple)
+        _reject_frozen_sources_in_design(adj_objects, des_det.grid_slice_tuple, skip=all_src_names)
 
-    win = gaussian_window(T) if window is None else window
+    win = gaussian_window(T, dtype=config.dtype) if window is None else window
     # Precompute the amplitude-solve matrix on concrete values so the solve itself
     # is a plain jnp.linalg.solve and works under trace inside the VJP.
     A_np = _design_matrix(np.asarray(omegas, dtype=np.float64), dt, np.asarray(jax.device_get(win)))
@@ -344,6 +392,24 @@ def make_reciprocity_phasor_fn(
         )
     A = jnp.asarray(A_np)
     nf = len(omegas)
+
+    # PhasorDetector multiplies every recorded sample by _static_scale(): 1 in
+    # "pulse" mode, 2/sum(window) in "continuous", which is its default. The kernel
+    # is calibrated on RAW phasors, so each scale is divided back out:
+    #
+    # * objective monitor, P = s_m * P_raw. JAX hands the VJP dL/dP, but the adjoint
+    #   current must reproduce dL/dP_raw = s_m * dL/dP. That is a per-DETECTOR
+    #   factor on the amplitude target: monitors in different modes each need their
+    #   own, so it cannot be one global factor on the gradient.
+    # * design region, F = s_d * F_raw in the forward run and Lambda = s_d * Lambda_raw
+    #   in the adjoint run, so the assembled gradient carries s_d twice.
+    #
+    # Measured on a 24^3 float64 scene, uncorrected best-fit scale against run_fdtd:
+    # 6.19e+05, 1.27e-03 and 7.87e+02 for the three non-pulse combinations. The
+    # internal design detectors are pulse, so s_d == 1 today; it is still divided
+    # out, from the placed detectors themselves, so the two stay consistent.
+    s_m_per_det = [float(d._static_scale()) for d in obj_dets]
+    s_d_sq = [float(f._static_scale()) * float(a._static_scale()) for f, a in zip(des_dets, des_dets_a)]
 
     # Magnetic components carry an extra factor, for two independent reasons.
     #
@@ -362,14 +428,14 @@ def make_reciprocity_phasor_fn(
     # 2.26e-01, with exp(-i w dt/2) 6.3e-07 at cosine 1.000000000.
     magnetic_factor = -np.exp(-1j * np.asarray(omegas, dtype=np.float64) * dt / 2.0)
     signs: list[jax.Array] = []
-    for d_i, state_key, _idx in channels:
+    for d_i, _state_key, _idx in channels:
         det = obj_dets[d_i]
-        is_magnetic = np.asarray([c.startswith("H") for c in det.components])
-        s = np.where(is_magnetic[None, :], magnetic_factor[:, None], 1.0 + 0.0j)
+        is_magnetic = np.asarray([c.startswith("H") for c in canonical_components(det)])
+        s = np.where(is_magnetic[None, :], magnetic_factor[:, None], 1.0 + 0.0j) * s_m_per_det[d_i]
         ndim_spatial = len(det.grid_shape)
         signs.append(jnp.asarray(s).reshape(s.shape + (1,) * ndim_spatial))
 
-    des_slice = des_det.grid_slice
+    des_slices = [d.grid_slice for d in des_dets]
 
     def _solve_amplitudes(target: jax.Array, sign: jax.Array) -> jax.Array:
         """Trace-safe solve_adjoint_amplitudes with the matrix precomputed."""
@@ -381,13 +447,13 @@ def make_reciprocity_phasor_fn(
         return (sol[:nf] + 1j * sol[nf:]).reshape(nf, *tail)
 
     def _forward(inv_eps: jax.Array):
-        arrays = forward_arrays.aset("inv_permittivities", inv_eps)
-        _, out = checkpointed_fdtd(arrays, forward_objects, config, key, show_progress=False)
+        arrays = fwd_arrays.aset("inv_permittivities", inv_eps)
+        _, out = checkpointed_fdtd(arrays, fwd_objects, config, key, show_progress=False)
         outs = []
         for name, wants_dict in zip(det_names, returns_dict):
             state = out.detector_states[name]
             outs.append(dict(state) if wants_dict else state["phasor"])
-        return tuple(outs), out.detector_states[design_detector]["phasor"]
+        return tuple(outs), tuple(out.detector_states[n]["phasor"] for n in des_names)
 
     @jax.custom_vjp
     def phasor_fn(inv_eps: jax.Array):
@@ -401,28 +467,33 @@ def make_reciprocity_phasor_fn(
         inv_eps, F = res
         # Build the adjoint container HERE, not in a closure: closing over a
         # traced source leaf is what raises UnexpectedTracerError.
-        new_list = list(adjoint_objects.object_list)
+        new_list = list(adj_objects.object_list)
         for (d_i, state_key, idx), sign in zip(channels, signs):
             ct_det = ct[d_i]
             ct_one = ct_det[state_key] if isinstance(ct_det, dict) else ct_det
             amplitudes = _solve_amplitudes(ct_one[0], sign)
             new_list[idx] = new_list[idx].aset("amplitudes", amplitudes)
-        objects_a = adjoint_objects.aset("object_list", new_list)
-        arrays_a = adjoint_arrays.aset("inv_permittivities", inv_eps)
+        objects_a = adj_objects.aset("object_list", new_list)
+        arrays_a = adj_arrays.aset("inv_permittivities", inv_eps)
         # One solve for every channel: the adjoint currents superpose, and so do
         # their contributions to the design gradient.
         _, out_a = checkpointed_fdtd(arrays_a, objects_a, config, key, show_progress=False)
-        lam = out_a.detector_states[design_detector]["phasor"]
 
-        g_design = assemble_material_gradient(
-            adjoint_phasors=lam,
-            forward_phasors=F,
-            inv_permittivities=inv_eps[:, *des_slice],
-            angular_frequencies=omegas,
-            dt=dt,
-            courant_number=courant,
-        )
-        grad = jnp.zeros_like(inv_eps).at[:, *des_slice].set(g_design.astype(inv_eps.dtype))
+        grad = jnp.zeros_like(inv_eps)
+        for name, F_i, sl, scale_sq in zip(des_names, F, des_slices, s_d_sq):
+            g_design = assemble_material_gradient(
+                adjoint_phasors=out_a.detector_states[name]["phasor"],
+                forward_phasors=F_i,
+                inv_permittivities=inv_eps[:, *sl],
+                angular_frequencies=omegas,
+                dt=dt,
+                courant_number=courant,
+            )
+            # divided by a Python float so a float32 run keeps full precision
+            g_design = g_design / scale_sq
+            # set, not add: where two regions overlap both compute the same
+            # value from the same fields, and adding would double it
+            grad = grad.at[:, *sl].set(g_design.astype(inv_eps.dtype))
         return (grad,)
 
     phasor_fn.defvjp(phasor_fwd, phasor_bwd)
