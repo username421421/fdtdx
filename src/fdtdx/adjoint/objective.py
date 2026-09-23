@@ -129,6 +129,29 @@ def _shape(slice_tuple: Sequence[tuple[int, int]]) -> tuple[int, ...]:
     return tuple(hi - lo for lo, hi in slice_tuple)
 
 
+def pml_weight(objects: ObjectContainer, block: SliceTuple3D) -> np.ndarray | None:
+    """Per cell of an adjoint-current block, the local strength of the PML it lies in, or None.
+
+    The strength is the PML's own CPML coefficient ``|a|``, normalised to its peak. It is graded
+    from zero at the interface, and the reciprocal pairing only fails where it is not small: a
+    current one cell into the PML is exact, deeper ones are not (box faces two cells deep: 1e-02).
+    """
+    weight = np.zeros(_shape(block))
+    for pml in objects.pml_objects:
+        lo = [max(b[0], p[0]) for b, p in zip(block, pml.grid_slice_tuple)]
+        hi = [min(b[1], p[1]) for b, p in zip(block, pml.grid_slice_tuple)]
+        if not all(x < z for x, z in zip(lo, hi)):
+            continue
+        # broadcast-shaped along the PML axis, e.g. (L, 1, 1); a leading component axis is reduced if present
+        a = np.maximum(*(np.abs(np.asarray(x)) for x in (pml.pml_a_E, pml.pml_a_H)))
+        a = a.max(axis=0) if a.ndim == 4 else a
+        a = np.broadcast_to(a / max(float(a.max()), np.finfo(float).tiny), pml.grid_shape)
+        local = a[tuple(slice(x - p[0], z - p[0]) for x, z, p in zip(lo, hi, pml.grid_slice_tuple))]
+        cells = tuple(slice(x - b[0], z - b[0]) for x, z, b in zip(lo, hi, block))
+        weight[cells] = np.maximum(weight[cells], local)
+    return weight if weight.any() else None
+
+
 def _select(E: jax.Array, H: jax.Array, components: Sequence[str]) -> jax.Array:
     return jnp.stack([(E if COMPONENT_MAP[c][0] == "E" else H)[COMPONENT_MAP[c][1]] for c in components], axis=0)
 

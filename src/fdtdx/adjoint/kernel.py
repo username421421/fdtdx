@@ -29,6 +29,10 @@ class ConvergenceWarning(UserWarning):
     """The phasors a reciprocity gradient is built from have not converged (see :func:`dft_tail`)."""
 
 
+class PmlWarning(UserWarning):
+    """Part of an objective's adjoint current lies in a PML, where the reciprocal pairing does not hold."""
+
+
 def gaussian_window(
     time_steps_total: int,
     center_frac: float = 0.22,
@@ -244,6 +248,16 @@ class TailReport:
         worst = max(tails, key=lambda k: tails[k])
         if tails[worst] > self.tolerance:
             self.warned.add(stage)
+            if stage == "objective_pml_share":
+                warnings.warn(
+                    f"A share {tails[worst]:.1e} of the adjoint current for {worst!r}, weighted by the local PML "
+                    "strength, lies inside a PML, where the reciprocal pairing does not hold; the gradient error "
+                    "is of that order or below. Keep objective monitors out of the PML (its first cell is "
+                    "harmless); pass tail_tolerance=None to silence this.",
+                    PmlWarning,
+                    stacklevel=2,
+                )
+                return
             if stage == "objective_tail":
                 meaning = "The returned phasors, and a figure of merit on them, carry an error of about that size."
             else:

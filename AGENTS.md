@@ -44,7 +44,8 @@ the gradient equals `jax.grad` of `apply_params -> run_fdtd(GradientConfig(
 float64, 9.4x faster at 24³ on the CPU and 35.3x at 48³ float32 on the GPU
 (`notes/adjoint/03-production.md`). `reciprocity_phasor_fn` is the same one
 level down, on `inv_permittivities`. `param_fn.diagnostics` and a
-`ConvergenceWarning` report DFTs that have not converged.
+`ConvergenceWarning` report DFTs that have not converged; a `PmlWarning`
+reports an objective whose adjoint current reaches the lossy part of a PML.
 
 **Supported:** any differentiable figure of merit over `PhasorDetector`
 phasors: E, H or both, components in any declared order, either
@@ -187,8 +188,10 @@ for reasons unrelated to correctness.
 
 **Settled:** FDTDX's CPML preserves discrete reciprocity for sources and
 monitors outside it, to 1.2e-15 with a slab present, and periodic boundaries
-give bit-identical results. Inside the layer the kernel's pairing does not hold,
-which is why a design region overlapping a PML is refused.
+give bit-identical results. Inside the lossy part of the layer the pairing does
+not hold: a design region overlapping a PML is refused, and an objective there
+raises a `PmlWarning` weighted by the local CPML strength (the first PML cell,
+graded to zero loss, is harmless; notes/adjoint/05-guards.md).
 
 ## Test problems come from the test bed, not from imagination
 

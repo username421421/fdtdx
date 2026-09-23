@@ -381,6 +381,25 @@ class TestSceneRefusals:
         objects, arrays, config = self._pml_scene(2)
         reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
+    @pytest.mark.parametrize("x, strong", [(0, True), (1, False), (2, False)])
+    def test_pml_weight_is_the_local_cpml_strength(self, x, strong):
+        """Two PML cells: the outer one is lossy, the interface one (sigma = 0 there) is harmless."""
+        from fdtdx.adjoint.objective import pml_weight
+
+        objects, _, _ = _scene(pml=2)
+        weight = pml_weight(objects, ((x, x + 1), (6, 7), (6, 7)))
+        assert (weight is not None and float(weight.max()) > 0.5) == strong
+
+    @pytest.mark.parametrize("x, reaches", [(1, True), (2, False)])
+    def test_exact_stencil_reaches_one_cell_further(self, x, reaches):
+        """A stock monitor's support starts one cell below it, so at x=1 it touches the lossy PML cell."""
+        from fdtdx.adjoint.objective import channel_recordings, pml_weight
+
+        objects, _, config = _scene(pml=2, regions=(("stock", (x, 6, 6), (1, 1, 1)),))
+        recs = channel_recordings(objects["stock"], objects, config)
+        weights = [pml_weight(objects, b) for rec in recs for b in rec.blocks]
+        assert any(w is not None for w in weights) == reaches
+
     def test_objective_monitors_must_share_frequencies(self):
         """They share one amplitude solve; the second would be driven at the first one's frequency."""
         other = [fdtdx.WaveCharacter(wavelength=650e-9)]

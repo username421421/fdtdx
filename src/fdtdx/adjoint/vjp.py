@@ -37,6 +37,7 @@ from fdtdx.adjoint.objective import (
     canonical_components,
     channel_recordings,
     lossy_injection,
+    pml_weight,
     raw_scale,
     stored_fields,
     target_factor,
@@ -83,6 +84,7 @@ class _Channel:
     recording: ChannelRecording
     sources: tuple[int, ...]  # its adjoint currents' indices in the adjoint object list, one per block
     losses: tuple[LossyInjection | None, ...]  # per block
+    pml: tuple[Any, ...]  # per block: local PML strength per cell, or None
     factor: jax.Array  # target_factor, broadcast over the cells
     scale: float  # raw_scale of the detector
     components: tuple[str, ...]
@@ -172,6 +174,7 @@ def make_phasor_fn(
                     sources=tuple(index[next(src_names)] for _ in rec.blocks),
                     # the conductivity of the arrays the adjoint solve injects into
                     losses=tuple(lossy_injection(adj_arrays, courant, b, comps) for b in rec.blocks),
+                    pml=tuple(pml_weight(objects, b) for b in rec.blocks),
                     factor=jnp.asarray(factor).reshape(factor.shape + (1,) * len(det.grid_shape)),
                     scale=raw_scale(det),
                     components=comps,
@@ -187,9 +190,11 @@ def make_phasor_fn(
         "objective_tail": {},
         "forward_design_tail": {},
         "adjoint_design_tail": {},
+        "objective_pml_share": {},
     }
     report = TailReport(diagnostics, tail_tolerance)
     labels = tuple(ch.label for ch in channels)
+    reads_pml = any(m is not None for ch in channels for m in ch.pml)
 
     def design_tails(out):
         return tuple(
@@ -239,14 +244,23 @@ def make_phasor_fn(
         # the adjoint container is built here, not closed over: a closed-over traced leaf
         # raises UnexpectedTracerError
         new_list = list(adj_objects.object_list)
+        shares = []
         for ch in channels:
             ct_det = ct[ch.detector]
             ct_one = ct_det[ch.recording.state_key] if isinstance(ct_det, dict) else ct_det
+            inside = total = 0.0
             # cotangent on the recorded values -> on the raw Yee fields the currents drive
-            for idx, target, loss in zip(ch.sources, ch.recording.transpose(ct_one[0]), ch.losses):
+            for idx, target, loss, weight in zip(ch.sources, ch.recording.transpose(ct_one[0]), ch.losses, ch.pml):
                 if loss is not None:
                     target = target / loss.divisor(inv_eps, live_sigma)[None]
+                power = jnp.abs(target) ** 2
+                total = total + jnp.sum(power)
+                if weight is not None:
+                    inside = inside + jnp.sum(power * weight**2)
                 new_list[idx] = new_list[idx].aset("amplitudes", solve_amplitudes(matrix, target * ch.factor))
+            shares.append(jnp.sqrt(inside / jnp.maximum(total, jnp.finfo(power.dtype).tiny)))
+        if reads_pml:
+            jax.debug.callback(partial(report, "objective_pml_share", labels), tuple(shares))
         _, out_a = checkpointed_fdtd(
             materials(adj_arrays, inv_eps, sigma),
             adj_objects.aset("object_list", new_list),

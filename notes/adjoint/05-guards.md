@@ -56,6 +56,20 @@ tail was 1.46 at 22 fs, where the gradient was rel 20. With the DC-carrying prod
 the objective tail floors at 3.1e-2 (a static remainder the far-field phasors never lose), so
 that stage keeps warning while the gradient itself converges (5.1e-3 at 320 fs).
 
+## PML warning (`PmlWarning`, same tolerance)
+
+An objective's adjoint current inside a PML breaks the reciprocal pairing, but only where the
+PML is lossy: FDTDX grades it as (d/L)^3 from zero at the interface, so its first cell is
+harmless. A blanket refusal of monitors touching a PML was tried and removed: it refused a
+mode port whose evanescent tail sits in the z-PML and whose gradient is exact (6.8e-05 at
+300 fs, converging). The backward pass instead reports the share of each objective's
+adjoint current weighted by the local CPML strength ``|a|`` (normalised to the PML's peak),
+``objective_pml_share`` in the diagnostics. Box far field (faces at cells 6 and 17 of 24),
+GPU float64, 150 fs, share -> gradient rel: PML 4-6 0 -> 5.6e-07 to 6.1e-07 (at 6 the
+stencil enters the zero-loss first cell, 69% of one face's current); PML 7 6.0e-03 ->
+5.4e-04; PML 8 2.9e-02 -> 1.0e-02. The mode port: 0. The share runs 3-10x the error, so the
+1e-2 tolerance flags the 1% case and neither exact one.
+
 ## The internal design detector
 
 Each setting was a user-facing, silent error before the detector became internal
@@ -183,4 +197,4 @@ lossless Device 1.4e-06).
 
 The same layout at 32x32x40 put the box's side faces inside the 8-cell PML: rel 1.36e-01 at
 cosine 0.992, lossless or lossy, at 60, 150 and 300 fs alike; with a 3-cell PML 2.4e-06. An
-objective monitor in the PML is not refused.
+objective monitor in the PML is not refused; it raises a `PmlWarning` (see above).

@@ -1337,7 +1337,46 @@ def _periodic_mode_scene(sim_fs):
     return objects, arrays, _varied(params), config
 
 
-def _box_far_field_scene(sim_fs=150.0):
+class TestPmlShare:
+    """The PML-weighted share of the adjoint current, against the real error (GPU, float64, 150 fs).
+
+    Box faces at cells 6 and 17 of 24. PML 6: the stencil enters the PML's zero-loss first cell,
+    share 0, rel 5.6e-07. PML 7: share 6.0e-03, rel 5.4e-04. PML 8: share 2.9e-02, rel 1.0e-02.
+    A mode port whose evanescent tail sits in the PML (TestStockObjectives): share 0, and exact.
+    """
+
+    theta = jnp.asarray([0.0, 0.3, 0.6, 2.6, 3.0])
+    phi = jnp.asarray([0.0, 0.8, 1.6, 2.4, 3.1])
+
+    def _run(self, pml):
+        from fdtdx.adjoint import PmlWarning
+
+        objects, arrays, params, config = _box_far_field_scene(pml=pml)
+
+        def power(det, state):
+            return -jnp.sum(det.project_all(state, self.theta, self.phi)["power"])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            same, rel, _, _ = _param_parity(objects, arrays, params, config, power, power, "ff")
+            jax.effects_barrier()
+        return same, rel, [w for w in caught if issubclass(w.category, PmlWarning)]
+
+    @pytest.mark.integration
+    def test_currents_deep_in_the_pml_warn_and_are_really_off(self):
+        same, rel, pml_warnings = self._run(pml=8)
+        assert same
+        assert pml_warnings, "no PmlWarning for faces two cells deep in the PML"
+        assert rel > 1e-3, f"the gradient was expected to be off, rel {rel:.3e}"
+
+    def test_the_first_pml_cell_is_harmless(self):
+        same, rel, pml_warnings = self._run(pml=6)
+        assert same
+        assert not pml_warnings, [str(w.message) for w in pml_warnings]
+        assert rel < 1e-5, f"rel {rel:.3e}"
+
+
+def _box_far_field_scene(sim_fs=150.0, pml=_PML):
     """The colour splitter's layout: plane wave down onto a Device on a substrate, box far field around it."""
     wl0 = 600e-9
     config = SimulationConfig(
@@ -1350,7 +1389,7 @@ def _box_far_field_scene(sim_fs=150.0):
     )
     vol = fdtdx.SimulationVolume(partial_grid_shape=(24, 24, 30))
     objs, cons = [vol], []
-    bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+    bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=pml), vol)
     objs.extend(bd.values())
     cons.extend(cl)
 

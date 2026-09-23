@@ -34,11 +34,12 @@ Modules: :mod:`~fdtdx.adjoint.api` (entry points), :mod:`~fdtdx.adjoint.vjp` (th
 """
 
 from fdtdx.adjoint.api import ReciprocityParamFn, reciprocity_param_fn, reciprocity_phasor_fn
-from fdtdx.adjoint.kernel import ConvergenceWarning, dft_tail, gaussian_window
+from fdtdx.adjoint.kernel import ConvergenceWarning, PmlWarning, dft_tail, gaussian_window
 from fdtdx.adjoint.vjp import ReciprocityPhasorFn
 
 __all__ = [
     "ConvergenceWarning",
+    "PmlWarning",
     "ReciprocityParamFn",
     "ReciprocityPhasorFn",
     "dft_tail",
