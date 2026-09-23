@@ -84,6 +84,7 @@ def _scene(
     monitor_shape=(1, 1, 1),
     monitor_cell=_MON,
     grid=None,
+    device_material=None,
 ):
     """24^3 test scene.
 
@@ -98,6 +99,7 @@ def _scene(
     stock defaults. ``extra_blocks`` are static ``(name, lower, shape, material)``
     blocks placed before the Devices, so a Device placed over one covers it.
     ``grid`` replaces the 50 nm cubes; objects are then placed by physical margins.
+    ``device_material`` replaces the Devices' ``si`` (eps 2.25) material.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
@@ -134,7 +136,10 @@ def _scene(
                 name=name,
                 partial_grid_shape=shape,
                 partial_voxel_grid_shape=(1, 1, 1),
-                materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+                materials={
+                    "air": fdtdx.Material(permittivity=1.0),
+                    "si": device_material or fdtdx.Material(permittivity=2.25),
+                },
                 param_transforms=[],
             )
             place(device, lower)
@@ -957,6 +962,40 @@ class TestDetectorDefaults:
         gs = objects["block"].grid_slice
         rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
         assert rel < 1e-5, f"continuous internal design detector: rel_L2 = {rel:.3e}"
+
+
+class TestLossyDevice:
+    """A lossy Device material: ``apply_params`` writes its conductivity with the permittivity's
+    weights, and the gradient carries that design dependence through the conductivity kernel,
+    ``eta0 (1 + exp(+i w dt)) / 2``. Before, the loss was dropped in every gradient method."""
+
+    @pytest.mark.integration
+    def test_lossy_dielectric_matches_official_pipeline(self):
+        """Permittivity and conductivity both follow the design; the conductivity term is needed."""
+        lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
+        objects, arrays, params, config, _ = _scene(with_device=True, device_material=lossy)
+        v_off, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12), "forward values must be identical"
+        a, b = _flat(g_rec), _flat(g_off)
+        rel, cos = _rel_cos(a, b)
+        scale = float(jnp.sum(a * b) / jnp.sum(b * b))
+        assert rel < 1e-5, f"lossy Device: rel_L2 = {rel:.3e}"
+        assert cos > 1 - 1e-8 and abs(scale - 1.0) < 1e-5, f"cosine {cos:.10f}, best-fit scale {scale:.8f}"
+
+    @pytest.mark.parametrize("sigma", [1e3, 1e7], ids=["mild", "metal_like"])
+    def test_conductivity_term_alone(self, sigma):
+        """An eps = 1 absorber against air: the permittivity is design-independent, so the whole
+        gradient is the conductivity term."""
+        absorber = fdtdx.Material(permittivity=1.0, electric_conductivity=sigma)
+        objects, arrays, params, config, _ = _scene(with_device=True, device_material=absorber)
+        _, g_off = _official_param_grad(objects, arrays, params, config)
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        g_rec = jax.grad(lambda p: _FOM(param_fn(p)))(params)
+        rel, _ = _rel_cos(_flat(g_rec), _flat(g_off))
+        assert rel < 1e-5, f"absorber sigma={sigma:.0e}: rel_L2 = {rel:.3e}"
 
 
 class TestAutoDesignRegion:

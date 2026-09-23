@@ -6,7 +6,8 @@ every stored channel to the target DFT of its adjoint currents (the recording tr
 scale and magnetic factors and the lossy divisor of :mod:`fdtdx.adjoint.objective`), solves
 for their amplitudes, runs one adjoint solve with all of them (currents superpose, so several
 monitors and every face of a box cost one solve), and pairs the adjoint and forward design
-phasors into the ``inv_permittivities`` gradient (:mod:`fdtdx.adjoint.kernel`).
+phasors into the ``inv_permittivities`` gradient and, when it is an input, the
+``electric_conductivity`` one (:mod:`fdtdx.adjoint.kernel`).
 """
 
 from __future__ import annotations
@@ -21,7 +22,14 @@ import jax.numpy as jnp
 
 from fdtdx.adjoint import validation
 from fdtdx.adjoint.design import internal_scene
-from fdtdx.adjoint.kernel import TailReport, amplitude_matrix, assemble_material_gradient, dft_tail, solve_amplitudes
+from fdtdx.adjoint.kernel import (
+    TailReport,
+    amplitude_matrix,
+    assemble_conductivity_gradient,
+    assemble_material_gradient,
+    dft_tail,
+    solve_amplitudes,
+)
 from fdtdx.adjoint.objective import (
     ChannelRecording,
     LossyInjection,
@@ -43,7 +51,11 @@ from fdtdx.objects.sources.source import Source
 
 
 class ReciprocityPhasorFn:
-    """``phasor_fn(inv_permittivities) -> phasors``, from :func:`~fdtdx.adjoint.reciprocity_phasor_fn`.
+    """``phasor_fn(inv_permittivities, electric_conductivity=None) -> phasors``.
+
+    From :func:`~fdtdx.adjoint.reciprocity_phasor_fn`. ``electric_conductivity``, in the units
+    ``ArrayContainer`` stores, replaces the scene's and is differentiated too; ``None`` keeps
+    the scene's, as a constant.
 
     Attributes:
         diagnostics: ``cond`` of the amplitude solve, and name -> :func:`~fdtdx.adjoint.kernel.dft_tail`
@@ -51,13 +63,15 @@ class ReciprocityPhasorFn:
             (``adjoint_design_tail``) solve, updated by every call, also under ``jit``.
     """
 
-    def __init__(self, fn: Callable[[jax.Array], tuple[Any, ...]], *, single: bool, diagnostics: dict[str, Any]):
+    def __init__(
+        self, fn: Callable[[jax.Array, jax.Array | None], tuple[Any, ...]], *, single: bool, diagnostics: dict[str, Any]
+    ):
         self._fn = fn
         self._single = single
         self.diagnostics = diagnostics
 
-    def __call__(self, inv_permittivities: jax.Array) -> Any:
-        out = self._fn(inv_permittivities)
+    def __call__(self, inv_permittivities: jax.Array, electric_conductivity: jax.Array | None = None) -> Any:
+        out = self._fn(inv_permittivities, electric_conductivity)
         return out[0] if self._single else out
 
 
@@ -183,10 +197,20 @@ def make_phasor_fn(
             for n, sl in zip(des_names, des_slices)
         )
 
-    def forward(inv_eps: jax.Array):
-        _, out = checkpointed_fdtd(
-            fwd_arrays.aset("inv_permittivities", inv_eps), fwd_objects, config, key, show_progress=False
-        )
+    def materials(arrs: ArrayContainer, inv_eps: jax.Array, sigma: jax.Array | None) -> ArrayContainer:
+        arrs = arrs.aset("inv_permittivities", inv_eps)
+        if sigma is None:
+            return arrs
+        if arrs.electric_conductivity is None:
+            # the objective monitors' lossy correction is built from the scene's conductivity
+            raise ValueError(
+                "electric_conductivity was passed, but the scene stores none. Place the scene with a "
+                "conductive material, or pass None."
+            )
+        return arrs.aset("electric_conductivity", sigma)
+
+    def forward(inv_eps: jax.Array, sigma: jax.Array | None):
+        _, out = checkpointed_fdtd(materials(fwd_arrays, inv_eps, sigma), fwd_objects, config, key, show_progress=False)
         objective_tails = []
         for ch in channels:
             raw = out.detector_states[names[ch.detector]][ch.recording.state_key][0] / ch.scale
@@ -202,15 +226,16 @@ def make_phasor_fn(
         return outs, tuple(out.detector_states[n]["phasor"] for n in des_names)
 
     @jax.custom_vjp
-    def phasor_fn(inv_eps: jax.Array):
-        return forward(inv_eps)[0]
+    def phasor_fn(inv_eps: jax.Array, sigma: jax.Array | None):
+        return forward(inv_eps, sigma)[0]
 
-    def phasor_fwd(inv_eps: jax.Array):
-        outs, F = forward(inv_eps)
-        return outs, (inv_eps, F)
+    def phasor_fwd(inv_eps: jax.Array, sigma: jax.Array | None):
+        outs, F = forward(inv_eps, sigma)
+        return outs, (inv_eps, sigma, F)
 
     def phasor_bwd(res, ct):
-        inv_eps, F = res
+        inv_eps, sigma, F = res
+        live_sigma = adj_arrays.electric_conductivity if sigma is None else sigma
         # the adjoint container is built here, not closed over: a closed-over traced leaf
         # raises UnexpectedTracerError
         new_list = list(adj_objects.object_list)
@@ -220,10 +245,10 @@ def make_phasor_fn(
             # cotangent on the recorded values -> on the raw Yee fields the currents drive
             for idx, target, loss in zip(ch.sources, ch.recording.transpose(ct_one[0]), ch.losses):
                 if loss is not None:
-                    target = target / loss.divisor(inv_eps)[None]
+                    target = target / loss.divisor(inv_eps, live_sigma)[None]
                 new_list[idx] = new_list[idx].aset("amplitudes", solve_amplitudes(matrix, target * ch.factor))
         _, out_a = checkpointed_fdtd(
-            adj_arrays.aset("inv_permittivities", inv_eps),
+            materials(adj_arrays, inv_eps, sigma),
             adj_objects.aset("object_list", new_list),
             config,
             key,
@@ -231,19 +256,17 @@ def make_phasor_fn(
         )
         jax.debug.callback(partial(report, "adjoint_design_tail", des_names), design_tails(out_a))
         grad = jnp.zeros_like(inv_eps)
+        grad_sigma = None if sigma is None else jnp.zeros_like(sigma)
         for name, F_i, sl, scale_sq in zip(des_names, F, des_slices, des_scale_sq):
-            g_design = assemble_material_gradient(
-                adjoint_phasors=out_a.detector_states[name]["phasor"],
-                forward_phasors=F_i,
-                inv_permittivities=inv_eps[:, *sl],
-                angular_frequencies=omegas,
-                dt=dt,
-                courant_number=courant,
-            )
+            lam = out_a.detector_states[name]["phasor"]
+            g_design = assemble_material_gradient(lam, F_i, inv_eps[:, *sl], omegas, dt, courant)
             # divided by a Python float so a float32 run keeps full precision; set, not
             # add: overlapping regions compute the same value from the same fields
             grad = grad.at[:, *sl].set((g_design / scale_sq).astype(inv_eps.dtype))
-        return (grad,)
+            if grad_sigma is not None:
+                g_sigma = assemble_conductivity_gradient(lam, F_i, grad_sigma.shape[0], omegas, dt)
+                grad_sigma = grad_sigma.at[:, *sl].set((g_sigma / scale_sq).astype(grad_sigma.dtype))
+        return grad, grad_sigma
 
     phasor_fn.defvjp(phasor_fwd, phasor_bwd)
     return ReciprocityPhasorFn(phasor_fn, single=single, diagnostics=diagnostics)

@@ -142,3 +142,45 @@ add, their shared cells: adding was rel 9.7e-01 at scale 1.93.
   coefficients on every call; the solves kept the block's: forward FoM off 60%, gradient rel
   8.3e-01 at cosine 0.66, nothing raised (half the Device over the block: 4.6e-01); after,
   2.6e-06.
+
+## Lossy Device materials
+
+`apply_params` interpolated a Device's permittivity and dispersion but never wrote its
+conductivity: a lossy Device material was lossless in every gradient method (FoM equal to the
+lossless one), and a Device over a lossy block kept the block's loss. It now writes the scaled
+conductivity (`sigma * c0 dt / courant`) with the permittivity's weights, and on the discrete
+path gathers it by index without a straight-through term, so a discrete Device's gradient is
+unchanged. Magnetic conductivity and permeability of Device materials are still not written,
+in every method alike.
+
+`update_E` steps `E1 = ((1 - a) E0 + c inv_eps curl H) / (1 + a)`, `a = c sigma eta0 inv_eps / 2`.
+At fixed `sigma`, `dE1/d inv_eps = (E1 - E0) / (inv_eps (1 + a))`, and the `1 + a` cancels
+against the lossy injection, so the permittivity kernel stays exact with a design-dependent
+`sigma`. `dE1/d sigma = -c eta0 inv_eps (E0 + E1) / (2 (1 + a))` gives the conductivity kernel
+`eta0 (1 + exp(+i w dt)) / 2`: same pairing, no `1 / inv_eps^2`.
+
+Parameter level against `apply_params -> run_fdtd(checkpointed)`, GPU, float64, 150 fs, FoM
+bit-equal in every case, cosine 1.0000000000 and best-fit scale 1 +- 7e-07 throughout:
+
+| scene (24^3, box 24x24x30) | sigma (S/m) | rel L2 | rel L2 without the conductivity term |
+| --- | --- | --- | --- |
+| dipole, PhasorDetector, eps 2.25 Device | 1e3 / 1e4 / 1e5 / 1e6 / 1e7 | 4.5e-07 / 3.6e-07 / 4.1e-07 / 3.2e-07 / 2.2e-07 | 0.05 / 0.58 / 1.31 / 0.98 / 1.00 |
+| eps 1 absorber (conductivity term alone) | 1e3 / 1e5 / 1e7 | 4.6e-07 / 5.0e-07 / 2.2e-07 | 1 |
+| + lossy slab below / under half the Device | 1e5 | 6.5e-07 / 5.9e-07 | 1.36 / 1.32 |
+| monitor inside the lossy Device | 1e5 / 1e7 | 4.6e-07 / 7.3e-07 | 1.02 / 1.00 |
+| stock 5-face FieldProjectionAngleDetector box | 1e4 / 1e5 / 1e6 / 1e7 | 5.7e-07 / 6.2e-07 / 4.6e-07 / 6.4e-07 | 0.31 / 0.91 / 0.98 / 1.00 |
+| box on a lossy substrate | 1e5 | 6.2e-07 | 0.93 |
+
+float32: 0.8e-06 to 1.5e-06 against float32 checkpointed; against float64 checkpointed it
+tracks float32 checkpointed (box: 9.2e-05 and 9.2e-05, the float32 FDTD floor).
+
+Cost, RTX 3080 Ti, 64x64x72, 1574 steps, lossy Device (32x32x8) on a lossy substrate, stock
+box far field, everything jitted, min of 5 interleaved calls: float32 forward 0.137 s,
+reciprocity value and gradient 0.355 s (2.60x), checkpointed 3.35 s (24.5x), rel 2.5e-06;
+the same scene with a lossless Device 0.353 s (2.59x), so the conductivity kernel costs
+nothing. float64: 1.46 s (2.39x) against 7.87 s (12.9x), rel 2.1e-06 (1.8e-06 at 300 fs;
+lossless Device 1.4e-06).
+
+The same layout at 32x32x40 put the box's side faces inside the 8-cell PML: rel 1.36e-01 at
+cosine 0.992, lossless or lossy, at 60, 150 and 300 fs alike; with a 3-cell PML 2.4e-06. An
+objective monitor in the PML is not refused.

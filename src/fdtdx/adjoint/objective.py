@@ -318,23 +318,28 @@ class LossyInjection:
 
     Attributes:
         index: the block's cells.
-        eps_rows: per stored component, the ``inv_permittivities`` row it uses.
-        electric: ``courant * sigma_E * eta0 / 2`` per component and cell (0 on H).
-        magnetic: ``b`` per component and cell (0 on E); ``inv_mu`` is static.
+        axes: per stored component, its axis, i.e. the row of a ``(3, ...)`` material array it uses.
+        electric: per stored component, ``courant * eta0 / 2`` on E and 0 on H.
+        magnetic: ``b`` per component and cell (0 on E); ``sigma_H`` and ``inv_mu`` are static.
     """
 
     index: tuple[slice, ...]
-    eps_rows: tuple[int, ...]
+    axes: tuple[int, ...]
     electric: np.ndarray
     magnetic: np.ndarray
 
-    def divisor(self, inv_eps: jax.Array) -> jax.Array:
-        """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps``."""
-        local = inv_eps[:, *self.index]
-        rows = jnp.stack([local[r] for r in self.eps_rows], axis=0)
-        electric = jnp.asarray(self.electric, dtype=inv_eps.dtype)
+    def divisor(self, inv_eps: jax.Array, sigma_e: jax.Array | None) -> jax.Array:
+        """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps`` and ``sigma_E``."""
         magnetic = jnp.asarray(self.magnetic, dtype=inv_eps.dtype)
-        return 1.0 + electric * rows + magnetic
+        if sigma_e is None:
+            return 1.0 + magnetic
+
+        def rows(arr):
+            local = arr[:, *self.index]
+            return jnp.stack([_component_row(local, axis) for axis in self.axes], axis=0)
+
+        electric = jnp.asarray(self.electric, dtype=inv_eps.dtype).reshape((-1,) + (1,) * (inv_eps.ndim - 1))
+        return 1.0 + electric * rows(sigma_e) * rows(inv_eps) + magnetic
 
 
 def lossy_injection(
@@ -343,31 +348,27 @@ def lossy_injection(
     block: Sequence[tuple[int, int]],
     components: Sequence[str],
 ) -> LossyInjection | None:
-    """The lossy-update divisor on ``block``, or ``None`` where every cell is lossless."""
+    """The lossy-update divisor on ``block``, or ``None`` in a scene without conductivity.
+
+    Built whenever the scene has an ``electric_conductivity``, which may be design-dependent
+    (a lossy Device); a lossless block then divides by exactly one.
+    """
     sigma_e = arrays.electric_conductivity
     sigma_h = arrays.magnetic_conductivity
     if sigma_e is None and sigma_h is None:
         return None
     index = tuple(slice(int(lo), int(hi)) for lo, hi in block)
     shape = tuple(int(hi) - int(lo) for lo, hi in block)
-    electric = np.zeros((len(components), *shape))
+    axes = tuple(COMPONENT_MAP[c][1] for c in components)
+    electric = np.asarray([courant * float(eta0) / 2.0 if c.startswith("E") else 0.0 for c in components])
     magnetic = np.zeros((len(components), *shape))
-    n_eps = int(arrays.inv_permittivities.shape[0])
     inv_mu = arrays.inv_permeabilities
-    eps_rows = []
     for k, comp in enumerate(components):
-        family, axis = COMPONENT_MAP[comp]
-        eps_rows.append(axis if n_eps > 1 else 0)
-        if family == "E" and sigma_e is not None:
-            sigma = np.asarray(jax.device_get(_component_row(sigma_e, axis)[index]), dtype=np.float64)
-            electric[k] = courant * float(eta0) * sigma / 2.0
-        elif family == "H" and sigma_h is not None:
-            sigma = np.asarray(jax.device_get(_component_row(sigma_h, axis)[index]), dtype=np.float64)
+        if comp.startswith("H") and sigma_h is not None:
+            sigma = np.asarray(jax.device_get(_component_row(sigma_h, axes[k])[index]), dtype=np.float64)
             if isinstance(inv_mu, jax.Array) and inv_mu.ndim > 0:
-                mu = np.asarray(jax.device_get(_component_row(inv_mu, axis)[index]), dtype=np.float64)
+                mu = np.asarray(jax.device_get(_component_row(inv_mu, axes[k])[index]), dtype=np.float64)
             else:
                 mu = float(inv_mu)
             magnetic[k] = courant * sigma * mu / (2.0 * float(eta0))
-    if not electric.any() and not magnetic.any():
-        return None
-    return LossyInjection(index=index, eps_rows=tuple(eps_rows), electric=electric, magnetic=magnetic)
+    return LossyInjection(index=index, axes=axes, electric=electric, magnetic=magnetic)

@@ -28,7 +28,7 @@ def reciprocity_phasor_fn(
     cond_limit: float = DEFAULT_COND_LIMIT,
     tail_tolerance: float | None = DEFAULT_TAIL_TOLERANCE,
 ) -> ReciprocityPhasorFn:
-    """Differentiable objective phasors as a function of ``inv_permittivities``.
+    """Differentiable objective phasors as a function of ``inv_permittivities`` (and ``electric_conductivity``).
 
     Args:
         arrays: placed arrays.
@@ -50,10 +50,11 @@ def reciprocity_phasor_fn(
             estimate exceeds this; ``None`` disables the warning.
 
     Returns:
-        ``phasor_fn(inv_permittivities)``: the monitor's phasor array, or a tuple over several
-        monitors; a monitor storing several arrays (a box) gives its whole state dict, to feed
-        its own readout (``project``, ``compute_net_flux``). ``phasor_fn.diagnostics`` holds the
-        solve's ``cond`` and the latest convergence estimates.
+        ``phasor_fn(inv_permittivities, electric_conductivity=None)``: the monitor's phasor
+        array, or a tuple over several monitors; a monitor storing several arrays (a box) gives
+        its whole state dict, to feed its own readout (``project``, ``compute_net_flux``).
+        ``electric_conductivity`` (``None``: the scene's, held constant) is differentiated too.
+        ``phasor_fn.diagnostics`` holds the solve's ``cond`` and the latest convergence estimates.
 
     Raises:
         NotImplementedError, ValueError: for a configuration the gradient would get wrong
@@ -93,7 +94,7 @@ class ReciprocityParamFn:
     Attributes:
         objects: the applied scene both solves run on. Read detector state from it, e.g. the
             reference mode ``ModeOverlapDetector.compute_overlap`` needs.
-        phasor_fn: the underlying ``phasor_fn(inv_permittivities)``.
+        phasor_fn: the underlying ``phasor_fn(inv_permittivities, electric_conductivity)``.
         diagnostics: ``phasor_fn.diagnostics``.
     """
 
@@ -112,7 +113,7 @@ class ReciprocityParamFn:
 
     def __call__(self, params: Any, **transform_kwargs: Any):
         updated, _, _ = apply_params(self._arrays, self._design_objects, params, self._key, **transform_kwargs)
-        return self.phasor_fn(updated.inv_permittivities)
+        return self.phasor_fn(updated.inv_permittivities, updated.electric_conductivity)
 
 
 def reciprocity_param_fn(
@@ -132,7 +133,9 @@ def reciprocity_param_fn(
     ``param_fn(params, **transform_kwargs)`` runs ``apply_params`` (so ``param_transforms``
     and schedules such as ``beta=`` are ordinary JAX) and :func:`reciprocity_phasor_fn`; the
     gradient is a ``ParameterContainer``, equal to ``jax.grad`` of ``apply_params`` then
-    ``run_fdtd`` with ``GradientConfig("checkpointed")``.
+    ``run_fdtd`` with ``GradientConfig("checkpointed")``. It carries the design dependence of
+    both the permittivity and the electric conductivity ``apply_params`` writes (lossy Device
+    materials).
 
     ``objects`` may come straight from ``place_objects``: the objects it left unapplied
     (sources and ports sharing a Device's projection) are applied once here, exactly as

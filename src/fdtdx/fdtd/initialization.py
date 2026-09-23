@@ -390,6 +390,26 @@ def apply_params(
             allowed_c2_arr = jnp.asarray(allowed_c2_np, dtype=arrays.dispersive_c2.dtype)
             allowed_c3_arr = jnp.asarray(allowed_c3_np, dtype=arrays.dispersive_c3.dtype)
 
+        # Like the dispersion, the conductivity is written whenever the scene stores one, so a lossy
+        # Device material is lossy and a Device over a lossy block does not keep the block's loss.
+        # Stored in the same scaled units as in _init_arrays.
+        sigma_e = arrays.electric_conductivity
+        allowed_sigma = new_sigma_slice = None
+        if sigma_e is not None:
+            num_sigma_components = sigma_e.shape[0]
+            conductivity_spacing = constants.c * device._config.time_step_duration / device._config.courant_number
+            allowed_sigma = (
+                jnp.asarray(
+                    compute_allowed_electric_conductivities(
+                        device.materials,
+                        isotropic=num_sigma_components == 1,
+                        diagonally_anisotropic=num_sigma_components == 3,
+                    ),
+                    dtype=sigma_e.dtype,
+                )
+                * conductivity_spacing
+            )  # shape: (num_materials, num_components)
+
         if device.output_type == ParameterType.CONTINUOUS:
             # Linear interpolation between two materials via their permittivities
             # Add spatial broadcast dims for element-wise multiplication
@@ -404,6 +424,15 @@ def apply_params(
                 perm_slice = perm_bc[0] + cur_material_indices * (perm_bc[1] - perm_bc[0])
 
             new_inv_perm_slice = _invert_property(perm_slice)
+
+            if sigma_e is not None and allowed_sigma is not None:
+                # same linear weights as the permittivity
+                sigma_bc = allowed_sigma[:, :, None, None, None]
+                if device.use_etching:
+                    sigma_slice = sigma_e[:, *device.grid_slice]
+                    new_sigma_slice = sigma_slice + cur_material_indices * (sigma_bc[0] - sigma_slice)
+                else:
+                    new_sigma_slice = sigma_bc[0] + cur_material_indices * (sigma_bc[1] - sigma_bc[0])
 
             if write_dispersive:
                 assert allowed_c1_arr is not None and allowed_c2_arr is not None and allowed_c3_arr is not None
@@ -435,6 +464,10 @@ def apply_params(
             component_values = jnp.moveaxis(inv_allowed[cur_material_indices.astype(jnp.int32)], -1, 0)
             new_inv_perm_slice = straight_through_estimator(cur_material_indices, component_values)
 
+            if allowed_sigma is not None:
+                # selected like the permittivity; the straight-through gradient stays on the permittivity
+                new_sigma_slice = jnp.moveaxis(allowed_sigma[cur_material_indices.astype(jnp.int32)], -1, 0)
+
             if write_dispersive:
                 assert allowed_c1_arr is not None and allowed_c2_arr is not None and allowed_c3_arr is not None
                 int_idx = cur_material_indices.astype(jnp.int32)
@@ -447,6 +480,9 @@ def apply_params(
         # Update all components of inv_permittivities array at once
         new_inv_perm = arrays.inv_permittivities.at[:, *device.grid_slice].set(new_inv_perm_slice)
         arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
+
+        if sigma_e is not None and new_sigma_slice is not None:
+            arrays = arrays.at["electric_conductivity"].set(sigma_e.at[:, *device.grid_slice].set(new_sigma_slice))
 
         if write_dispersive:
             assert (

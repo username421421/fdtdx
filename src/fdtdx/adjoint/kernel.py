@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from fdtdx.adjoint.validation import check_conditioning
+from fdtdx.constants import eta0
 
 #: Ceiling on the condition number of the amplitude-solve matrix. The float32 solve error is
 #: about ``1e-8 * cond``, so 1e4 keeps it near 1e-4.
@@ -129,6 +130,28 @@ def leapfrog_kernel(angular_frequencies: Sequence[float], dt: float, courant_num
     return (np.exp(1j * omega * dt) - 1.0) / courant_number
 
 
+def conductivity_kernel(angular_frequencies: Sequence[float], dt: float) -> np.ndarray:
+    """``eta0 (1 + exp(+i w dt)) / 2``: the conductivity's counterpart of :func:`leapfrog_kernel`.
+
+    ``update_E`` steps ``E_{n+1} = ((1 - a) E_n + courant * inv_eps * curl_H) / (1 + a)``,
+    ``a = courant * sigma * eta0 * inv_eps / 2``, so a perturbation moves the field by
+    ``d(inv_eps) (E_{n+1} - E_n) / (inv_eps (1 + a))`` or ``-d(sigma) courant eta0 inv_eps
+    (E_{n+1} + E_n) / (2 (1 + a))``: the time sum ``(1 + exp(+i w dt)) F`` replaces the difference,
+    and ``inv_eps`` cancels. ``sigma`` in FDTDX's stored units (conductivity times grid spacing).
+    """
+    omega = np.asarray(angular_frequencies, dtype=np.float64)
+    return float(eta0) * (1.0 + np.exp(1j * omega * dt)) / 2.0
+
+
+def _pair(adjoint_phasors: jax.Array, forward_phasors: jax.Array, kern: np.ndarray, rows: int) -> jax.Array:
+    """``Re[sum_f kern(w_f) sum_c Lambda_c F_c]``, components summed for a one-row (isotropic) material."""
+    lam = adjoint_phasors[0]
+    fwd = forward_phasors[0]
+    overlap = jnp.sum(lam * fwd, axis=1, keepdims=True) if rows == 1 else lam * fwd
+    kern_b = jnp.asarray(kern).reshape((-1,) + (1,) * (overlap.ndim - 1))
+    return jnp.real(jnp.sum(kern_b * overlap, axis=0))
+
+
 def assemble_material_gradient(
     adjoint_phasors: jax.Array,
     forward_phasors: jax.Array,
@@ -141,7 +164,8 @@ def assemble_material_gradient(
 
     ``Re[sum_f K(w_f) sum_c Lambda_c F_c] / inv_eps^2`` with ``K`` the :func:`leapfrog_kernel`.
     The component axis is summed for an isotropic ``(1, ...)`` permittivity, since one value
-    per cell drives all three E components.
+    per cell drives all three E components. Exact with loss in the cells too: the ``1 + a`` of
+    the lossy update cancels against the lossy injection of the reciprocal source.
 
     Args:
         adjoint_phasors: adjoint-solve design phasors, ``(1, nf, 3, *cells)``, raw scale.
@@ -154,16 +178,20 @@ def assemble_material_gradient(
     Returns:
         Real gradient shaped like ``inv_permittivities``.
     """
-    lam = adjoint_phasors[0]
-    fwd = forward_phasors[0]
-    if inv_permittivities.shape[0] == 1:
-        overlap = jnp.sum(lam * fwd, axis=1, keepdims=True)
-    else:
-        overlap = lam * fwd
-    kern = jnp.asarray(leapfrog_kernel(angular_frequencies, dt, courant_number))
-    kern = kern.reshape((-1,) + (1,) * (overlap.ndim - 1))
+    kern = leapfrog_kernel(angular_frequencies, dt, courant_number)
     eps_sq = 1.0 / (inv_permittivities**2)
-    return jnp.real(jnp.sum(kern * overlap, axis=0)) * eps_sq
+    return _pair(adjoint_phasors, forward_phasors, kern, inv_permittivities.shape[0]) * eps_sq
+
+
+def assemble_conductivity_gradient(
+    adjoint_phasors: jax.Array,
+    forward_phasors: jax.Array,
+    rows: int,
+    angular_frequencies: Sequence[float],
+    dt: float,
+) -> jax.Array:
+    """``d loss / d electric_conductivity`` on one design region, ``(rows, *cells)``, :func:`conductivity_kernel`."""
+    return _pair(adjoint_phasors, forward_phasors, conductivity_kernel(angular_frequencies, dt), rows)
 
 
 def dft_tail(

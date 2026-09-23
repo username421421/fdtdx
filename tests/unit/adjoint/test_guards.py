@@ -139,17 +139,26 @@ class TestLossyInjection:
         comps = ("Ex", "Ey", "Ez") if family == "E" else ("Hx", "Hy", "Hz")
         loss = lossy_injection(arrays, float(config.courant_number), block, comps)
         assert loss is not None
-        got = np.asarray(loss.divisor(arrays.inv_permittivities))
+        got = np.asarray(loss.divisor(arrays.inv_permittivities, arrays.electric_conductivity))
         want = factor[:, 4:8, 4:8, 4:8]
         np.testing.assert_allclose(got, want, rtol=1e-12)
         assert want.max() > 1.1  # the lossy cells are really lossy ...
         np.testing.assert_allclose(want[:, 0], 1.0, rtol=1e-12)  # ... and x = 4 really is not
 
-    def test_lossless_block_needs_no_divisor(self):
+    def test_divisor_follows_the_live_conductivity(self):
+        """A Device can make the conductivity design-dependent, so the divisor reads it per call;
+        a lossless block divides by exactly one."""
         from fdtdx.adjoint.objective import lossy_injection
 
         _, arrays, config = self._lossy_scene()
-        assert lossy_injection(arrays, float(config.courant_number), ((8, 10), (4, 8), (4, 8)), ("Ez", "Hx")) is None
+        ie, sigma = arrays.inv_permittivities, arrays.electric_conductivity
+        lossless = lossy_injection(arrays, float(config.courant_number), ((8, 10), (4, 8), (4, 8)), ("Ez", "Hx"))
+        assert lossless is not None and np.all(np.asarray(lossless.divisor(ie, sigma)) == 1.0)
+        loss = lossy_injection(arrays, float(config.courant_number), ((4, 8), (4, 8), (4, 8)), ("Ez",))
+        assert loss is not None
+        a = np.asarray(loss.divisor(ie, sigma)) - 1.0
+        np.testing.assert_allclose(np.asarray(loss.divisor(ie, 3.0 * sigma)) - 1.0, 3.0 * a, rtol=1e-12)
+        assert a.max() > 0.1
 
     def test_sources_are_added_after_the_lossy_division(self):
         """The premise of the correction: FDTDX does not divide a source by 1 + a."""
@@ -179,6 +188,13 @@ class TestLossyInjection:
             reciprocity_phasor_fn(
                 arrays.aset("electric_conductivity", tensor), objects, config, _KEY, objective_detectors="mon"
             )
+
+    def test_conductivity_for_a_scene_without_one_is_refused(self):
+        """The lossy correction is built from the scene's conductivity; a scene with none has none."""
+        objects, arrays, config = _scene()
+        phasor_fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        with pytest.raises(ValueError, match="the scene stores none"):
+            phasor_fn(arrays.inv_permittivities, jnp.zeros_like(arrays.inv_permittivities))
 
 
 class TestDispersionUnderDevice:
