@@ -18,7 +18,7 @@ from fdtdx.adjoint import gaussian_window, reciprocity_param_fn, reciprocity_pha
 from fdtdx.adjoint.vjp import derive_adjoint_objects
 from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.constants import c as c0
-from fdtdx.core.grid import UniformGrid
+from fdtdx.core.grid import QuasiUniformGrid, UniformGrid
 from fdtdx.fdtd.initialization import apply_params
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 
@@ -83,6 +83,7 @@ def _scene(
     extra_blocks=(),
     monitor_shape=(1, 1, 1),
     monitor_cell=_MON,
+    grid=None,
 ):
     """24^3 test scene.
 
@@ -96,12 +97,13 @@ def _scene(
     monitor except its name, shape and frequencies; ``{}`` is PhasorDetector's
     stock defaults. ``extra_blocks`` are static ``(name, lower, shape, material)``
     blocks placed before the Devices, so a Device placed over one covers it.
+    ``grid`` replaces the 50 nm cubes; objects are then placed by physical margins.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
     config = SimulationConfig(
         time=sim_fs * 1e-15,
-        grid=UniformGrid(spacing=_RES),
+        grid=grid or UniformGrid(spacing=_RES),
         backend="cpu",
         dtype=jnp.float64,
         courant_factor=0.99,
@@ -113,11 +115,18 @@ def _scene(
     bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
     objs.extend(bd.values())
     cons.extend(cl)
+    edges = None if grid is None else [config.resolve_grid((_N,) * 3).edges(a) for a in range(3)]
+
+    def place(obj, lower):
+        objs.append(obj)
+        if edges is None:
+            cons.append(obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
+        else:  # index-space placement is refused on a non-uniform grid
+            margins = tuple(float(e[i] - e[0]) for e, i in zip(edges, lower))
+            cons.append(obj.place_relative_to(vol, (0, 1, 2), (-1,) * 3, (-1,) * 3, margins=margins))
 
     for name, lower, shape, material in extra_blocks:
-        extra = fdtdx.UniformMaterialObject(name=name, partial_grid_shape=shape, material=material)
-        cons.append(extra.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
-        objs.append(extra)
+        place(fdtdx.UniformMaterialObject(name=name, partial_grid_shape=shape, material=material), lower)
 
     if devices:
         for name, lower, shape in devices:
@@ -128,20 +137,17 @@ def _scene(
                 materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
                 param_transforms=[],
             )
-            cons.append(device.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lower))
-            objs.append(device)
+            place(device, lower)
     else:
         block = fdtdx.UniformMaterialObject(
             name="block",
             partial_grid_shape=(_DES_SPAN,) * 3,
             material=fdtdx.Material(permittivity=2.25, electric_conductivity=sigma),
         )
-        cons.append(block.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
-        objs.append(block)
+        place(block, (_DES_LO,) * 3)
 
-    src, constraint = _narrowband_dipole("src", source_cell)
-    cons.append(constraint)
-    objs.append(src)
+    src, _ = _narrowband_dipole("src", source_cell)
+    place(src, source_cell)
 
     wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
     if monitor_kwargs is None:
@@ -153,9 +159,10 @@ def _scene(
             reduce_volume=False,
             dtype=jnp.complex128,
         )
-    mon = fdtdx.PhasorDetector(name="mon", partial_grid_shape=monitor_shape, wave_characters=wcs, **monitor_kwargs)
-    cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=monitor_cell))
-    objs.append(mon)
+    place(
+        fdtdx.PhasorDetector(name="mon", partial_grid_shape=monitor_shape, wave_characters=wcs, **monitor_kwargs),
+        monitor_cell,
+    )
     if mon2_scaling is not None:
         mon2 = fdtdx.PhasorDetector(
             name="mon2",
@@ -168,9 +175,7 @@ def _scene(
             reduce_volume=False,
             dtype=jnp.complex128,
         )
-        mon2_cell = (_MON[0], _MON[1] + 2, _MON[2])
-        cons.append(mon2.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=mon2_cell))
-        objs.append(mon2)
+        place(mon2, (_MON[0], _MON[1] + 2, _MON[2]))
     if design_detector_kwargs is None:
         design_detector_kwargs = dict(
             components=("Ex", "Ey", "Ez"),
@@ -185,8 +190,7 @@ def _scene(
         partial_grid_shape=(_DES_SPAN,) * 3,
         **{"wave_characters": wcs, **design_detector_kwargs},
     )
-    cons.append(des.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(_DES_LO,) * 3))
-    objs.append(des)
+    place(des, (_DES_LO,) * 3)
 
     return fdtdx.place_objects(object_list=objs, config=config, constraints=cons, key=_KEY)
 
@@ -445,7 +449,7 @@ class TestMagneticComponents:
             ("Hx",),
             ("Hy",),
             ("Ez", "Hx"),
-            ("Hx", "Ez"),
+            pytest.param(("Hx", "Ez"), marks=pytest.mark.integration),
             ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
         ],
         ids=["Ez", "Hx", "Hy", "Ez_Hx", "Hx_Ez_declared_out_of_order", "all_six"],
@@ -930,6 +934,7 @@ class TestDetectorDefaults:
         rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
         assert rel < 1e-5, f"mixed-mode monitors: rel_L2 = {rel:.3e}"
 
+    @pytest.mark.integration
     def test_design_scale_is_divided_out_twice(self, monkeypatch):
         """Exercise the 1/(s_d_fwd * s_d_adj) path, dead while the internal detector is pulse.
 
@@ -1208,7 +1213,7 @@ class TestStockObjectives:
         assert rel < 1e-5, f"symmetry plane: rel_L2 = {rel:.3e} (scale {scale:.6f})"
         assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
 
-    @pytest.mark.parametrize("scaling_mode", ["continuous", "pulse"])
+    @pytest.mark.parametrize("scaling_mode", [pytest.param("continuous", marks=pytest.mark.integration), "pulse"])
     def test_strided_monitor_matches_the_strided_reference(self, scaling_mode):
         """``dft_subsample=3`` against the exact gradient of the strided recording.
 
@@ -1381,12 +1386,25 @@ def _parity_metrics(g_off, g_rec):
     return rel, cos, float(jnp.sum(a * b) / jnp.sum(a * a))
 
 
+def _assert_device_parity(**scene_kwargs):
+    """``_scene(with_device=True, **scene_kwargs)``: the Device-parameter gradient of ``_FOM`` on
+    ``"mon"`` against ``run_fdtd``'s, forward value bit-identical, rel_L2 and best-fit scale at 1e-5."""
+    objects, arrays, params, config, _ = _scene(with_device=True, **scene_kwargs)
+    v_off, g_off = _official_param_grad(objects, arrays, params, config)
+    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+    v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
+    assert v_rec == v_off, "the forward value must be bit-identical to run_fdtd's"
+    rel, cos, scale = _parity_metrics(g_off, g_rec)
+    assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+
 # A lossy block around the monitor cell (18, 12, 12): x 17..19, y 10..14, z 10..14,
 # clear of the design (8..15), the source (5, 12, 12) and the PML (from 20).
 _AROUND_MON = ((17, 10, 10), (3, 5, 5))
 # The same block from y = 12 up, so it covers two of the three cells of a y-line
 # monitor at (18, 11..13, 12).
 _HALF_MON = ((17, 12, 10), (3, 3, 5))
+_ANISO = fdtdx.Material(permittivity=(2.0, 3.0, 4.0))
 
 
 class TestLossyMonitor:
@@ -1403,34 +1421,81 @@ class TestLossyMonitor:
     interpolation, continuous) (Ez, Hx) monitor below.
     """
 
-    def _parity(self, **scene_kwargs):
-        objects, arrays, params, config, _ = _scene(with_device=True, **scene_kwargs)
-        v_off, g_off = _official_param_grad(objects, arrays, params, config)
-        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
-        v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
-        assert v_rec == v_off, "the forward value must be bit-identical to run_fdtd's"
-        return _parity_metrics(g_off, g_rec)
-
     def test_electric_loss_around_the_monitor(self):
         lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
-        rel, cos, scale = self._parity(extra_blocks=[("loss", *_AROUND_MON, lossy)])
-        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+        _assert_device_parity(extra_blocks=[("loss", *_AROUND_MON, lossy)])
 
     def test_magnetic_loss_around_the_monitor(self):
         lossy = fdtdx.Material(permittivity=1.0, magnetic_conductivity=6e9)
-        rel, cos, scale = self._parity(extra_blocks=[("mloss", *_AROUND_MON, lossy)], components=("Hx",))
-        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+        _assert_device_parity(extra_blocks=[("mloss", *_AROUND_MON, lossy)], components=("Hx",))
 
+    @pytest.mark.integration
     def test_partial_loss_under_a_stock_monitor(self):
         """Loss on two of three cells, both families, stock monitor: the stencil
         support straddles the lossy edge, so the divisor must be per cell."""
         lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5, magnetic_conductivity=6e9)
-        rel, cos, scale = self._parity(
+        _assert_device_parity(
             extra_blocks=[("loss", *_HALF_MON, lossy)],
             monitor_kwargs=dict(components=("Ez", "Hx"), dtype=jnp.complex128),
             monitor_shape=(1, 3, 1),
             monitor_cell=(_MON[0], _MON[1] - 1, _MON[2]),
         )
+
+
+class TestAnisotropicAndMagneticMaterials:
+    """The paths only a diagonally anisotropic material (three ``inv_eps`` rows) or mu != 1 reaches.
+
+    Each catches an error every isotropic scene passes, all silent (these cases, measured):
+    the kernel summing the component axis of a three-row ``inv_eps``, a pure scale 3.0 at
+    cosine 1.0 in the first three; the adjoint current's injection factor read from row 0,
+    rel 2.0e-01 (scale 1.17) at the stock monitor and 9.4e-01 (scale 1.92) at the raw one; the
+    lossy divisor read from row 0, rel 2.1e-01 (scale 0.80); the H current ignoring
+    ``inv_mu``, a pure scale 2.0 at cosine 1.0.
+    """
+
+    @pytest.mark.parametrize(
+        "scene_kwargs",
+        [
+            dict(extra_blocks=[("aniso", (_DES_LO,) * 3, (_DES_SPAN,) * 3, _ANISO)], components=("Ex", "Ey", "Ez")),
+            dict(extra_blocks=[("aniso", *_AROUND_MON, _ANISO)], monitor_kwargs={}, monitor_shape=(1, 2, 1)),
+            dict(
+                extra_blocks=[
+                    (
+                        "aniso",
+                        *_AROUND_MON,
+                        fdtdx.Material(permittivity=(2.0, 3.0, 4.0), electric_conductivity=(1e5, 2e5, 3e5)),
+                    )
+                ],
+                components=("Ex", "Ey", "Ez"),
+            ),
+            dict(
+                extra_blocks=[("mu", *_AROUND_MON, fdtdx.Material(permittivity=1.5, permeability=2.0))],
+                components=("Hx",),
+            ),
+        ],
+        ids=["eps_under_the_device", "eps_at_a_stock_monitor", "sigma_at_a_raw_monitor", "mu_at_an_hx_monitor"],
+    )
+    def test_matches_official(self, scene_kwargs):
+        _assert_device_parity(**scene_kwargs)
+
+
+class TestGeometry:
+    def test_one_cell_width_per_axis_matches_official(self):
+        """dz = 40 nm against 50 nm in x and y; widths varying along an axis are refused (test_guards.py)."""
+        _assert_device_parity(grid=QuasiUniformGrid(dx=_RES, dy=_RES, dz=40e-9))
+
+    def test_overlapping_named_regions_match_official(self):
+        """Both regions compute the same value on their shared cells. Adding instead of setting it
+        was rel 9.7e-01 at best-fit scale 1.93, silently."""
+        halo = ("halo", (_DES_LO - 1,) * 3, (_DES_SPAN + 2,) * 3, fdtdx.Material(permittivity=1.0))
+        objects, arrays, _, config, _ = _scene(extra_blocks=[halo])
+        _, g_off = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
+        fn = reciprocity_phasor_fn(
+            arrays, objects, config, _KEY, objective_detectors="mon", design_detector=("halo", "block")
+        )
+        g_rec = jax.grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
+        gs = objects["halo"].grid_slice
+        rel, cos, scale = _parity_metrics(g_off[:, *gs], g_rec[:, *gs])
         assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
 
 
@@ -1462,11 +1527,13 @@ class TestConvergenceDiagnostic:
         ]
         assert len(tails) == 3 and max(tails) < 1e-4, diag
 
+    @pytest.mark.integration
     def test_truncated_run_warns_and_is_really_wrong(self):
         # Measured in this scene (CPU, float64): 25 fs warns (objective tail 5.9e-02) and the
         # gradient is off by rel 2.2e-01; at 30 fs the tails are <= 3.0e-03, the gradient is
         # within 6.2e-03 and the warning is correctly silent.
         scene, g_rec, diag, convergence = self._value_and_grad(25.0)
+        assert all(diag[k] for k in ("objective_tail", "forward_design_tail", "adjoint_design_tail")), diag
         assert convergence, f"no ConvergenceWarning, diagnostics {diag}"
         assert "have not converged" in str(convergence[0].message)
         _, g_off = _official_param_grad(*scene)
@@ -1491,6 +1558,7 @@ class TestDispersiveBlockUnderDevice:
     cosine 0.66, nothing raised. Half the Device over the block: rel 4.6e-01.
     """
 
+    @pytest.mark.integration
     def test_device_over_a_lorentz_block_matches_official(self):
         block = ("lorentz", (_DES_LO,) * 3, (_DES_SPAN,) * 3, _LORENTZ)
         objects, arrays, params, config, _ = _scene(with_device=True, extra_blocks=[block])

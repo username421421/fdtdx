@@ -19,7 +19,7 @@ import fdtdx
 from fdtdx.adjoint import gaussian_window, reciprocity_param_fn, reciprocity_phasor_fn
 from fdtdx.adjoint.kernel import solve_adjoint_amplitudes
 from fdtdx.config import SimulationConfig
-from fdtdx.core.grid import UniformGrid
+from fdtdx.core.grid import QuasiUniformGrid, RectilinearGrid, UniformGrid
 from fdtdx.fdtd.update import update_E, update_H
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
@@ -38,10 +38,6 @@ def _enable_x64():
         jax.config.update("jax_enable_x64", previous)
 
 
-def _at(obj, lo):
-    return obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lo)
-
-
 def _scene(
     *,
     devices=(("design", (4, 4, 4), (4, 4, 4)),),
@@ -50,18 +46,33 @@ def _scene(
     time=10e-15,
     wavelengths=(600e-9, 700e-9),
     monitor=((10, 6, 6), (1, 1, 1), ("Ez",)),
+    grid=None,
+    pml=0,
     return_params=False,
 ):
-    """12^3 scene, no boundaries and no source. ``regions`` are extra detectors
-    ``(name, lower, shape)``; ``blocks`` are ``(name, lower, shape, material)``."""
-    config = SimulationConfig(time=time, grid=UniformGrid(spacing=50e-9), backend="cpu", dtype=jnp.float64)
+    """12^3 scene, no source, and no boundaries unless ``pml`` cells of PML. ``regions`` are
+    extra stock detectors ``(name, lower, shape[, wave_characters])``; ``blocks`` are
+    ``(name, lower, shape, material)``. ``grid`` defaults to 50 nm cubes."""
+    config = SimulationConfig(time=time, grid=grid or UniformGrid(spacing=50e-9), backend="cpu", dtype=jnp.float64)
     objs, cons = [], []
     vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
     objs.append(vol)
+    if pml:
+        bd, cl = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=pml), vol)
+        objs.extend(bd.values())
+        cons.extend(cl)
+    edges = None if grid is None else [config.resolve_grid((_N,) * 3).edges(a) for a in range(3)]
+
+    def at(obj, lo):
+        objs.append(obj)
+        if edges is None:
+            cons.append(obj.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=lo))
+        else:  # index-space placement is refused on a non-uniform grid
+            margins = tuple(float(e[i] - e[0]) for e, i in zip(edges, lo))
+            cons.append(obj.place_relative_to(vol, (0, 1, 2), (-1,) * 3, (-1,) * 3, margins=margins))
+
     for name, lo, shape, material in blocks:
-        blk = fdtdx.UniformMaterialObject(name=name, partial_grid_shape=shape, material=material)
-        cons.append(_at(blk, lo))
-        objs.append(blk)
+        at(fdtdx.UniformMaterialObject(name=name, partial_grid_shape=shape, material=material), lo)
     for name, lo, shape in devices:
         dev = fdtdx.Device(
             name=name,
@@ -70,8 +81,7 @@ def _scene(
             materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
             param_transforms=[],
         )
-        cons.append(_at(dev, lo))
-        objs.append(dev)
+        at(dev, lo)
     wcs = [fdtdx.WaveCharacter(wavelength=w) for w in wavelengths]
     mon_lo, mon_shape, mon_comps = monitor
     mon = PhasorDetector(
@@ -81,12 +91,9 @@ def _scene(
         components=mon_comps,
         exact_interpolation=False,
     )
-    cons.append(_at(mon, mon_lo))
-    objs.append(mon)
-    for name, lo, shape in regions:
-        det = PhasorDetector(name=name, partial_grid_shape=shape, wave_characters=wcs)
-        cons.append(_at(det, lo))
-        objs.append(det)
+    at(mon, mon_lo)
+    for name, lo, shape, *own in regions:
+        at(PhasorDetector(name=name, partial_grid_shape=shape, wave_characters=own[0] if own else wcs), lo)
     objects, arrays, params, config, _ = fdtdx.place_objects(
         object_list=objs, config=config, constraints=cons, key=_KEY
     )
@@ -208,12 +215,13 @@ class TestAmplitudeSolveGuard:
 
         assert DEFAULT_COND_LIMIT == 1e4
 
-    def test_mid_range_condition_is_refused_by_default(self):
+    @pytest.mark.parametrize("entry", [reciprocity_phasor_fn, reciprocity_param_fn], ids=["phasor_fn", "param_fn"])
+    def test_mid_range_condition_is_refused_by_default(self, entry):
         # 5 fs, 600 and 620 nm: cond 1.9e4, which the former 1e8 default accepted
         objects, arrays, config = _scene(time=5e-15, wavelengths=(600e-9, 620e-9))
         with pytest.raises(ValueError, match="ill-conditioned"):
-            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
-        reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", cond_limit=1e8)
+            entry(arrays, objects, config, _KEY, objective_detectors="mon")
+        entry(arrays, objects, config, _KEY, objective_detectors="mon", cond_limit=1e8)
 
     def test_solve_adjoint_amplitudes_uses_the_same_default(self):
         dt = 0.99 * 50e-9 / (299792458.0 * np.sqrt(3.0))
@@ -320,3 +328,46 @@ class TestTopLevelExports:
         done = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300)
         assert done.returncode == 0, done.stderr[-2000:]
         assert done.stdout.strip() == "fdtdx.adjoint.api"
+
+
+# --------------------------------------------------------------------------- 5. grid, PML, frequencies
+
+
+class TestSceneRefusals:
+    """Measured before the refusals (test_production's 24^3 scene, parameter level), nothing
+    raised: x widths varying by +-20% rel 1.5e-01 at cosine 0.992, scale 0.91 (+-5%: 3.8e-02;
+    one width per axis: TestGeometry, parity); a Device three cells into the PML rel 2.5e-01
+    at scale 0.93, all of it on the PML cells (2.2e-07 on the rest; touching it: 3.0e-07)."""
+
+    def test_varying_cell_widths_are_refused(self):
+        widths = 50e-9 * (1.0 + 0.2 * np.sin(2 * np.pi * np.arange(_N) / 9.0))
+        x = np.concatenate([[0.0], np.cumsum(widths)])
+        u = 50e-9 * np.arange(_N + 1.0)
+        objects, arrays, config = _scene(grid=RectilinearGrid(x_edges=x, y_edges=u, z_edges=u))
+        with pytest.raises(NotImplementedError, match="cell widths vary along x"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+    def test_one_width_per_axis_is_accepted(self):
+        objects, arrays, config = _scene(grid=QuasiUniformGrid(dx=50e-9, dy=50e-9, dz=40e-9))
+        assert config.has_nonuniform_grid
+        reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+    def _pml_scene(self, x_lo):
+        """Two PML cells per face; the Device starts at x = ``x_lo``, the monitor clear of the PML."""
+        return _scene(pml=2, devices=(("design", (x_lo, 4, 4), (4, 4, 4)),), monitor=((8, 6, 6), (1, 1, 1), ("Ez",)))
+
+    def test_design_region_in_a_pml_is_refused(self):
+        objects, arrays, config = self._pml_scene(1)
+        with pytest.raises(NotImplementedError, match=r"'design' \(the min_x PML\) reach into a PML"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+    def test_design_region_touching_a_pml_is_accepted(self):
+        objects, arrays, config = self._pml_scene(2)
+        reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
+    def test_objective_monitors_must_share_frequencies(self):
+        """They share one amplitude solve; the second would be driven at the first one's frequency."""
+        other = [fdtdx.WaveCharacter(wavelength=650e-9)]
+        objects, arrays, config = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
+        with pytest.raises(ValueError, match="must share frequencies"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"))

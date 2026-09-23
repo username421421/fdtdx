@@ -110,6 +110,25 @@ factor `(1 + exp(+i w dt)) / 2` costs rel 8.5e-02 at cosine 0.996 and its conjug
   one cell short rel 8.0e-01, shifted by a cell 4.6e-01, a second Device left out 7.0e-01.
 * **Stock source inside the design region.** A dipole at its centre: rel 1.16
   (`03-production.md`, correction 2).
+* **Cell widths varying along an axis.** FDTDX's curls scale E by the primal and H by the
+  dual (averaged) widths, a pairing the adjoint currents and the kernel do not weight. The
+  24^3 test scene with x widths varying by +-20%: rel 1.49e-01 at cosine 0.9916, scale 0.911;
+  by +-5%: rel 3.82e-02 at cosine 0.99947, scale 0.979; forward value exact, nothing raised
+  (CPU, float64). One width per axis (`QuasiUniformGrid`, dz = 40 nm) is exact, 1.55e-07.
+* **Design region in a PML.** The same scene, PML x 0..4, Device x 1..9: rel 2.51e-01 at
+  cosine 0.968, scale 0.927, all of it on the three PML cell layers (rel 5.1e-01 there,
+  2.2e-07 on the rest). A Device touching the PML (x 4..12) is exact, 3.0e-07.
+
+## Paths no isotropic scene reaches
+
+Breaking any of these passed the whole suite until `TestAnisotropicAndMagneticMaterials`
+(parameter level, 24^3, CPU): the kernel summing the component axis of a three-row
+`inv_permittivities`, rel 2.0 at scale 3.0 and cosine 1.0; the adjoint current's injection
+factor read from row 0, rel 2.0e-01 (scale 1.17) at a stock monitor over a (2, 3, 4) block and
+9.4e-01 (scale 1.92) at a raw monitor over a lossy one; the lossy divisor read from row 0,
+rel 2.1e-01 (scale 0.80); the H current ignoring `inv_mu` at an Hx monitor over a mu = 2
+block, rel 1.0 at scale 2.0 and cosine 1.0. Overlapping named design regions must set, not
+add, their shared cells: adding was rel 9.7e-01 at scale 1.93.
 
 ## Corrections
 

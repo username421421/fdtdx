@@ -46,7 +46,9 @@ def _pulse():
 
 
 def _scene(kind, source_inside=False):
-    """Device plus a source (and, for "mode", a mode port) whose projection overlaps it."""
+    """Device plus a source (and, for "mode", a mode port) whose projection overlaps it.
+
+    ``"random"`` is ``"plane"`` with a random incidence angle, drawn from the key ``apply`` gets."""
     config = SimulationConfig(time=10e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", dtype=jnp.float64)
     air, core = fdtdx.Material(permittivity=1.0), fdtdx.Material(permittivity=4.0)
     if kind == "mode":
@@ -115,6 +117,7 @@ def _scene(kind, source_inside=False):
                 wave_character=_wc(),
                 temporal_profile=_pulse(),
                 normalize_by_energy=True,
+                max_angle_random_offset=10.0 if kind == "random" else 0.0,
             ),
             (0, 0, 9 if source_inside else 14),
         )
@@ -144,8 +147,9 @@ def test_placed_objects_come_back_unapplied(kind):
         assert isinstance(objects["port"]._mode_E, Null)
 
 
-@pytest.mark.parametrize("kind", ["plane", "mode"])
+@pytest.mark.parametrize("kind", ["plane", "mode", "random"])
 def test_identical_to_apply_params(kind):
+    """``"random"``: the same key, split the same way per object, or the incidence angle differs."""
     objects, arrays, params, _ = _scene(kind)
     once = apply_objects_once(arrays, objects, _KEY)
     _, ref, _ = apply_params(arrays, objects, params, _KEY)

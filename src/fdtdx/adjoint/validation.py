@@ -15,6 +15,7 @@ import jax
 import numpy as np
 
 from fdtdx.adjoint.objective import is_box_projection
+from fdtdx.config import SimulationConfig
 from fdtdx.core.null import Null
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.objects.boundaries.bloch import BlochBoundary
@@ -102,8 +103,30 @@ def _check_objective_settings(det: PhasorDetector, name: str) -> None:
             raise NotImplementedError(f"The objective detector {name!r} {why}")
 
 
-def check_scene(objects: ObjectContainer, arrays: ArrayContainer) -> None:
-    """Refuse Bloch wave vectors, full 3x3 material tensors and TFSF sources that were never applied."""
+def _stretched_axes(config: SimulationConfig) -> list[str]:
+    """The axes whose cell widths vary, at ``RectilinearGrid``'s own uniformity tolerance."""
+    grid = config.resolved_grid
+    if grid is None:  # an unresolved UniformGrid or QuasiUniformGrid: one width per axis
+        return []
+    out = []
+    for axis in range(3):
+        edges = np.asarray(grid.edges(axis))
+        widths = np.diff(edges)
+        roundoff = 8.0 * float(np.finfo(edges.dtype).eps) * float(np.abs(edges).max())
+        if np.abs(widths - widths[0]).max() > 1e-4 * widths[0] + roundoff:
+            out.append(f"{'xyz'[axis]} ({widths.min():.3e} to {widths.max():.3e} m)")
+    return out
+
+
+def check_scene(objects: ObjectContainer, arrays: ArrayContainer, config: SimulationConfig) -> None:
+    """Refuse varying cell widths, Bloch wave vectors, full 3x3 material tensors and unapplied TFSF sources."""
+    stretched = _stretched_axes(config)
+    if stretched:
+        raise NotImplementedError(
+            f"The grid's cell widths vary along {', '.join(stretched)}. FDTDX's curls then scale E by the primal "
+            "and H by the dual (averaged) widths, a pairing the adjoint currents and the gradient kernel do not "
+            f"weight. Use one width per axis (UniformGrid or QuasiUniformGrid) or {_CHECKPOINTED}."
+        )
     bloch = [
         f"{b.name!r} (bloch_vector={tuple(b.bloch_vector)})"
         for b in objects.boundary_objects
@@ -136,6 +159,21 @@ def check_scene(objects: ObjectContainer, arrays: ArrayContainer) -> None:
             f"Source(s) {', '.join(unapplied)} were never applied: place_objects skips every object whose "
             "projection overlaps a Device's. Use reciprocity_param_fn, which applies them once at setup, or pass "
             "the objects apply_params returned."
+        )
+
+
+def check_outside_pml(objects: ObjectContainer, regions: Sequence[SimulationObject]) -> None:
+    """Refuse a design region reaching into a PML, where the kernel's reciprocal pairing does not hold."""
+    inside = [
+        f"{region.name!r} (the {pml.descriptive_name} PML)"
+        for region in regions
+        for pml in objects.pml_objects
+        if slices_overlap(region.grid_slice_tuple, pml.grid_slice_tuple)
+    ]
+    if inside:
+        raise NotImplementedError(
+            f"Design region(s) {', '.join(inside)} reach into a PML, where the gradient would be wrong. Keep "
+            f"design regions out of the PML, or use {_CHECKPOINTED}."
         )
 
 

@@ -64,8 +64,9 @@ def reciprocity_phasor_fn(
     """
     names = validation.as_names(objective_detectors)
     detectors = validation.objective_detectors(objects, names)
-    validation.check_scene(objects, arrays)
+    validation.check_scene(objects, arrays, config)
     regions = design_regions(objects, design_detector)
+    validation.check_outside_pml(objects, regions)
     validation.check_sources_outside(objects, regions)
     if design_detector is not None:
         validation.check_coverage(objects, regions, design_detector, refuse=False)
