@@ -17,7 +17,7 @@ import pytest
 
 import fdtdx
 from fdtdx.adjoint import gaussian_window, reciprocity_param_fn, reciprocity_phasor_fn
-from fdtdx.adjoint.reciprocity import solve_adjoint_amplitudes
+from fdtdx.adjoint.kernel import solve_adjoint_amplitudes
 from fdtdx.config import SimulationConfig
 from fdtdx.core.grid import UniformGrid
 from fdtdx.fdtd.update import update_E, update_H
@@ -125,12 +125,12 @@ class TestLossyInjection:
 
     @pytest.mark.parametrize("family", ["E", "H"])
     def test_divisor_is_fdtdx_own_lossy_factor(self, family):
-        from fdtdx.adjoint.vjp import _lossy_injection
+        from fdtdx.adjoint.objective import lossy_injection
 
         _, arrays, config, factor = self._fdtdx_factor(family)
         block = ((4, 8), (4, 8), (4, 8))
         comps = ("Ex", "Ey", "Ez") if family == "E" else ("Hx", "Hy", "Hz")
-        loss = _lossy_injection(arrays, float(config.courant_number), block, comps)
+        loss = lossy_injection(arrays, float(config.courant_number), block, comps)
         assert loss is not None
         got = np.asarray(loss.divisor(arrays.inv_permittivities))
         want = factor[:, 4:8, 4:8, 4:8]
@@ -139,10 +139,10 @@ class TestLossyInjection:
         np.testing.assert_allclose(want[:, 0], 1.0, rtol=1e-12)  # ... and x = 4 really is not
 
     def test_lossless_block_needs_no_divisor(self):
-        from fdtdx.adjoint.vjp import _lossy_injection
+        from fdtdx.adjoint.objective import lossy_injection
 
         _, arrays, config = self._lossy_scene()
-        assert _lossy_injection(arrays, float(config.courant_number), ((8, 10), (4, 8), (4, 8)), ("Ez", "Hx")) is None
+        assert lossy_injection(arrays, float(config.courant_number), ((8, 10), (4, 8), (4, 8)), ("Ez", "Hx")) is None
 
     def test_sources_are_added_after_the_lossy_division(self):
         """The premise of the correction: FDTDX does not divide a source by 1 + a."""
@@ -180,7 +180,7 @@ class TestDispersionUnderDevice:
     Measured before: forward FoM off by 60%, gradient rel 8.3e-01 at cosine 0.66."""
 
     def test_zeroing_matches_apply_params(self):
-        from fdtdx.adjoint.api import device_dispersion_as_applied
+        from fdtdx.adjoint.design import device_dispersion_as_applied
         from fdtdx.fdtd.initialization import apply_params
 
         pole = fdtdx.LorentzPole(resonance_frequency=4e15, damping=2e14, delta_epsilon=0.5)
@@ -204,7 +204,7 @@ class TestAmplitudeSolveGuard:
     ceiling, and gave gradient rel 20. float32 solve error is about 1e-8 * cond."""
 
     def test_default_limit_is_1e4(self):
-        from fdtdx.adjoint.reciprocity import DEFAULT_COND_LIMIT
+        from fdtdx.adjoint.kernel import DEFAULT_COND_LIMIT
 
         assert DEFAULT_COND_LIMIT == 1e4
 
@@ -282,7 +282,7 @@ class TestDesignRegionMustCoverDevices:
             reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="a")
 
     def test_covering_regions_are_accepted(self):
-        from fdtdx.adjoint.vjp import uncovered_device_cells
+        from fdtdx.adjoint.validation import uncovered_device_cells
 
         objects, arrays, config = _scene(
             devices=(("a", (1, 1, 1), (3, 3, 3)), ("b", (6, 6, 6), (3, 3, 3))),

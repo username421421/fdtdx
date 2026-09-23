@@ -10,13 +10,8 @@ import jax.numpy as jnp
 import pytest
 
 import fdtdx
-from fdtdx.adjoint.scene import (
-    DESIGN_DETECTOR_PREFIX,
-    DESIGN_DETECTOR_SETTINGS,
-    canonical_components,
-    design_regions,
-    internal_scene,
-)
+from fdtdx.adjoint.design import DESIGN_DETECTOR_PREFIX, DESIGN_DETECTOR_SETTINGS, design_regions, internal_scene
+from fdtdx.adjoint.objective import canonical_components
 from fdtdx.config import SimulationConfig
 from fdtdx.core.grid import UniformGrid
 from fdtdx.objects.detectors.phasor import PhasorDetector
@@ -59,15 +54,10 @@ def _scene(*, devices=(("design", (4, 4, 4), (4, 4, 4)),), stock_detector=True, 
 
 def _internal(objects, arrays, config, design=None, keep=("mon",)):
     mon = next(d for d in objects.detectors if d.name == "mon")
-    return internal_scene(
-        objects,
-        arrays,
-        config,
-        _KEY,
-        keep_detectors=keep,
-        design=design,
-        wave_characters=mon.wave_characters,
+    ia, io, names = internal_scene(
+        arrays, objects, config, _KEY, keep_detectors=keep, design=design, wave_characters=mon.wave_characters
     )
+    return io, ia, names
 
 
 class TestDesignRegions:
@@ -86,7 +76,7 @@ class TestDesignRegions:
 
     def test_unknown_name_raises(self):
         objects, _, _ = _scene()
-        with pytest.raises(ValueError, match="No object named"):
+        with pytest.raises(ValueError, match="does not exist"):
             design_regions(objects, "nope")
 
 

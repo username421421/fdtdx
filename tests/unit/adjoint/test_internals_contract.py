@@ -75,7 +75,7 @@ class TestDetectorContract:
         assert len(private) == len(public)
         # 1e-6, not exact: the detector stores its frequencies at the simulation
         # dtype, so a float32 run round-trips them with about 1.6e-08 relative
-        # error (0 in float64). The production check in fdtdx/adjoint/vjp.py uses
+        # error (0 in float64). The production check in fdtdx/adjoint/validation.py uses
         # the same tolerance for the same reason.
         for a, b in zip(private, public):
             assert abs(a - float(b)) / abs(float(b)) < 1e-6
@@ -215,6 +215,6 @@ class TestUpdateEquationContract:
         src = inspect.getsource(upd.update_E)
         assert "factor = 1 - c * sigma_E * eta0 * inv_eps / 2" in src, (
             "the lossy E update changed shape; re-derive the gradient kernel in "
-            "fdtdx/adjoint/reciprocity.py and re-run the sigma sweep"
+            "fdtdx/adjoint/kernel.py and re-run the sigma sweep"
         )
         assert "factor * arrays.fields.E + c * curl * inv_eps" in src

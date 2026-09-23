@@ -14,13 +14,8 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.adjoint import (
-    derive_adjoint_objects,
-    design_region_slice,
-    gaussian_window,
-    reciprocity_param_fn,
-    reciprocity_phasor_fn,
-)
+from fdtdx.adjoint import gaussian_window, reciprocity_param_fn, reciprocity_phasor_fn
+from fdtdx.adjoint.vjp import derive_adjoint_objects
 from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.constants import c as c0
 from fdtdx.core.grid import UniformGrid
@@ -412,15 +407,14 @@ class TestMaterialAndGeometryCoverage:
             components=("Ez",),
             wave_character=fdtdx.WaveCharacter(wavelength=_WL[0]),
         ).place_on_grid(grid_slice_tuple=((centre, centre + 1),) * 3, config=config, key=_KEY)
-        des_slice = next(d for d in objects.detectors if d.name == "des").grid_slice_tuple
         swapped = objects.aset(
             "object_list",
             [o for o in objects.object_list if getattr(o, "name", None) != "src"] + [live],
         )
         # must not raise despite sitting at the centre of the design region
-        from fdtdx.adjoint.vjp import _reject_frozen_sources_in_design
+        from fdtdx.adjoint.validation import check_sources_outside
 
-        _reject_frozen_sources_in_design(swapped, des_slice)
+        check_sources_outside(swapped, [objects["des"]])
 
 
 class TestMagneticComponents:
@@ -493,14 +487,16 @@ class TestMagneticComponents:
         Without the flip the Hx gradient anti-correlates with the truth, so the
         optimizer would walk uphill.
         """
-        from fdtdx.adjoint import vjp as _vjp
+        from fdtdx.adjoint.objective import target_factor
 
-        omegas = _OMEGAS
-        dt = 1e-16
-        factor = -np.exp(-1j * np.asarray(omegas) * dt / 2.0)
-        assert np.all(factor.real < 0), "the magnetic factor must carry the reciprocity sign"
-        assert not np.allclose(factor, -1.0), "the half-step phase must not be dropped"
-        assert hasattr(_vjp, "make_reciprocity_phasor_fn")
+        objects, _, _, config, _ = _scene(sim_fs=20.0, components=("Ez", "Hx"))
+        dt = float(config.time_step_duration)
+        factor = target_factor(objects["mon"], exact=False, angular_frequencies=_OMEGAS, dt=dt)
+        magnetic = factor[:, 1]
+        np.testing.assert_allclose(factor[:, 0], 1.0)
+        np.testing.assert_allclose(magnetic, -np.exp(-1j * np.asarray(_OMEGAS) * dt / 2.0))
+        assert np.all(magnetic.real < 0), "the magnetic factor must carry the reciprocity sign"
+        assert not np.allclose(magnetic, -1.0), "the half-step phase must not be dropped"
 
 
 class TestNearToFar:
@@ -864,7 +860,7 @@ class TestDetectorDefaults:
     ============================  ==========  ========
 
     The design detector is now internal (built by
-    ``fdtdx.adjoint.scene.make_design_detector``), so the user's one is only used
+    ``fdtdx.adjoint.design.make_design_detector``), so the user's one is only used
     for its cells, and the monitor's scale is divided out of the adjoint target.
     Every assertion is on relative L2: all the scaling errors this guards against
     had cosine 1.0000000000.
@@ -907,7 +903,7 @@ class TestDetectorDefaults:
             fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="des")
             v_rec, g_rec = jax.value_and_grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
             assert jnp.allclose(v_rec, v_off, rtol=1e-12)
-            gs = design_region_slice(objects, "des")
+            gs = objects["des"].grid_slice
             rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
             assert rel < 1e-5, f"monitor {mon_scaling}, design {des_scaling}: rel_L2 = {rel:.3e}"
 
@@ -930,7 +926,7 @@ class TestDetectorDefaults:
         )
         v_rec, g_rec = jax.value_and_grad(lambda x: fom(*fn(x)))(arrays.inv_permittivities)
         assert jnp.allclose(v_rec, v_off, rtol=1e-12)
-        gs = design_region_slice(objects, "block")
+        gs = objects["block"].grid_slice
         rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
         assert rel < 1e-5, f"mixed-mode monitors: rel_L2 = {rel:.3e}"
 
@@ -941,19 +937,19 @@ class TestDetectorDefaults:
         the forward and the adjoint phasors; dividing it out once instead of
         twice would leave a factor 1/s_d = 787 here.
         """
-        from fdtdx.adjoint import scene as adj_scene
+        from fdtdx.adjoint import design as adj_design
 
-        monkeypatch.setitem(adj_scene.DESIGN_DETECTOR_SETTINGS, "scaling_mode", "continuous")
+        monkeypatch.setitem(adj_design.DESIGN_DETECTOR_SETTINGS, "scaling_mode", "continuous")
         objects, arrays, _, config, _ = _scene(mon_scaling="continuous")
         block = next(o for o in objects.object_list if o.name == "block")
         mon = next(d for d in objects.detectors if d.name == "mon")
-        probe = adj_scene.make_design_detector(block, mon.wave_characters, config, _KEY)
+        probe = adj_design.make_design_detector(block, mon.wave_characters, config, _KEY)
         assert float(probe._static_scale()) < 1e-2, "the design scale path is not being exercised"
 
         _, g_off = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
         fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block")
         g_rec = jax.grad(lambda x: _FOM(fn(x)))(arrays.inv_permittivities)
-        gs = design_region_slice(objects, "block")
+        gs = objects["block"].grid_slice
         rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
         assert rel < 1e-5, f"continuous internal design detector: rel_L2 = {rel:.3e}"
 
@@ -1079,13 +1075,13 @@ class TestStockObjectives:
 
     def test_stencil_transpose_and_time_average_are_both_needed(self, monkeypatch):
         """An Hx monitor recorded as if raw: measured rel 2.0e-01 at cosine 0.980 (with them 8.3e-07)."""
-        from fdtdx.adjoint import recording, scene, vjp
+        from fdtdx.adjoint import objective, vjp
 
         objects, arrays, _, config, _ = _scene(
             monitor_kwargs=dict(components=("Hx",), scaling_mode="pulse", dtype=jnp.complex128)
         )
         _, g_off = _official_inv_eps_grad(objects, arrays, config, lambda s: _FOM(s["mon"]["phasor"]))
-        gs = design_region_slice(objects, "block")
+        gs = objects["block"].grid_slice
 
         def rel_now():
             fn = reciprocity_phasor_fn(
@@ -1095,12 +1091,11 @@ class TestStockObjectives:
             return _rel_cos(g[:, *gs], g_off[:, *gs])[0]
 
         assert rel_now() < 1e-5
-        honest = recording.channel_recordings
+        honest = objective.channel_recordings
 
         def as_raw(detector, *args, **kwargs):
             return honest(detector.aset("exact_interpolation", False), *args, **kwargs)
 
-        monkeypatch.setattr(scene, "channel_recordings", as_raw)
         monkeypatch.setattr(vjp, "channel_recordings", as_raw)
         assert rel_now() > 1e-2
 

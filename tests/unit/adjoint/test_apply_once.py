@@ -15,7 +15,8 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.adjoint import apply_objects_once, reciprocity_param_fn, reciprocity_phasor_fn
+from fdtdx.adjoint import reciprocity_param_fn, reciprocity_phasor_fn
+from fdtdx.adjoint.design import apply_objects_once
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import c as c0
 from fdtdx.core.grid import UniformGrid

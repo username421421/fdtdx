@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.adjoint import gaussian_window, leapfrog_kernel, solve_adjoint_amplitudes
-from fdtdx.adjoint.vjp import make_reciprocity_phasor_fn
+from fdtdx.adjoint import gaussian_window, reciprocity_phasor_fn
+from fdtdx.adjoint.kernel import leapfrog_kernel, solve_adjoint_amplitudes
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import c as c0
 from fdtdx.core.grid import UniformGrid
@@ -71,12 +71,11 @@ def _config(sim_fs: float) -> SimulationConfig:
     )
 
 
-def _build(config, src_cell, amplitudes, window, src_name, periodic=False):
+def _build(config, src_cell, amplitudes, window, src_name):
     objs, cons = [], []
     volume = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
     objs.append(volume)
-    override = {k: "periodic" for k in ("min_x", "max_x", "min_y", "max_y", "min_z", "max_z")} if periodic else None
-    bcfg = fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML, override_types=override)
+    bcfg = fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML)
     bd, cl = fdtdx.boundary_objects_from_config(bcfg, volume)
     objs.extend(bd.values())
     cons.extend(cl)
@@ -137,17 +136,13 @@ def _build(config, src_cell, amplitudes, window, src_name, periodic=False):
     return o, a, cfg
 
 
-def _scenes(sim_fs: float, periodic: bool = False):
-    """Forward and adjoint scenes plus the shared window, for one runtime."""
+def _scene(sim_fs: float):
+    """The forward scene, driven by an AdjointCurrentSource, and its window, for one runtime."""
     config = _config(sim_fs)
     window = gaussian_window(config.time_steps_total)
-    nf, nc = len(_OMEGAS), len(_COMP)
-    unit = jnp.ones((nf, nc, 1, 1, 1), dtype=jnp.complex128)
-    zero = jnp.zeros((nf, nc, 1, 1, 1), dtype=jnp.complex128)
+    unit = jnp.ones((len(_OMEGAS), len(_COMP), 1, 1, 1), dtype=jnp.complex128)
     amp_fwd, _ = solve_adjoint_amplitudes(unit, _OMEGAS, config.time_step_duration, window)
-    fwd = _build(config, _SRC, amp_fwd, window, "src", periodic)
-    adj = _build(config, _MON, zero, window, "adj", periodic)
-    return fwd, adj, window
+    return _build(config, _SRC, amp_fwd, window, "src"), window
 
 
 def _run(arrays, objects, config, inv_eps=None):
@@ -158,19 +153,10 @@ def _run(arrays, objects, config, inv_eps=None):
 
 
 def _phasor_fn(sim_fs: float):
-    (obj_f, arr_f, cfg), (obj_a, arr_a, _), window = _scenes(sim_fs)
-    fn = make_reciprocity_phasor_fn(
-        forward_arrays=arr_f,
-        forward_objects=obj_f,
-        adjoint_arrays=arr_a,
-        adjoint_objects=obj_a,
-        config=cfg,
-        key=_KEY,
-        objective_detectors="mon",
-        design_detector="des",
-        adjoint_sources=[["adj"]],
-        window=window,
-    )
+    """The adjoint scene is derived internally; a hand-built second scene (a zero
+    AdjointCurrentSource at the monitor) gave bit-identical phasors and gradients."""
+    (obj_f, arr_f, cfg), window = _scene(sim_fs)
+    fn = reciprocity_phasor_fn(arr_f, obj_f, cfg, _KEY, objective_detectors="mon", design_detector="des", window=window)
     return fn, obj_f, arr_f, cfg
 
 
@@ -503,15 +489,4 @@ class TestUnsupportedConfigurations:
         )
         a, o, _ = fdtdx.apply_params(a, o, p, jax.random.PRNGKey(0))
         with pytest.raises(NotImplementedError, match="reduce_volume"):
-            make_reciprocity_phasor_fn(
-                forward_arrays=a,
-                forward_objects=o,
-                adjoint_arrays=a,
-                adjoint_objects=o,
-                config=cfg,
-                key=_KEY,
-                objective_detectors="mon",
-                design_detector="des",
-                adjoint_sources=[["adj"]],
-                window=window,
-            )
+            reciprocity_phasor_fn(a, o, cfg, _KEY, objective_detectors="mon", design_detector="des", window=window)

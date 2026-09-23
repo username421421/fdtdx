@@ -1,6 +1,6 @@
 """The recording transpose against FDTDX's own detector update, no solves.
 
-``fdtdx.adjoint.recording`` claims that for every channel of an objective
+``fdtdx.adjoint.objective`` claims that for every channel of an objective
 detector, ``sum(R(x) * y) == sum over blocks of sum(x[block] * R^T(y))`` with
 ``R`` the map from raw Yee fields to what the detector stores. Here ``R`` is not
 re-derived: it is one call of FDTDX's ``update_detector_states`` at step 0,
@@ -20,8 +20,7 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.adjoint.recording import FAMILY_AXIS, channel_recordings, is_interior
-from fdtdx.adjoint.scene import canonical_components, detector_channels
+from fdtdx.adjoint.objective import canonical_components, channel_recordings, is_interior, stored_fields
 from fdtdx.config import SimulationConfig
 from fdtdx.core.grid import UniformGrid
 from fdtdx.fdtd.update import update_detector_states
@@ -113,7 +112,7 @@ def _check_pairing(objects, arrays, config, name):
     """Assert the unconjugated (and conjugated) pairing on every channel; return the recordings."""
     det = next(d for d in objects.detectors if d.name == name)
     comps = canonical_components(det)
-    recordings = channel_recordings(det, detector_channels(det, name), comps, objects=objects, config=config)
+    recordings = channel_recordings(det, objects, config)
     grid = tuple(int(n) for n in objects.volume.grid_shape)
     kE, kH, ky = jax.random.split(jax.random.PRNGKey(7), 3)
     E = _random_complex(kE, (3, *grid))
@@ -121,7 +120,7 @@ def _check_pairing(objects, arrays, config, name):
     # R is real-linear, so R(x) for complex x is assembled from two real records
     re = _fdtdx_record(objects, arrays, config, name, jnp.real(E), jnp.real(H))
     im = _fdtdx_record(objects, arrays, config, name, jnp.imag(E), jnp.imag(H))
-    x_stored = jnp.stack([(E if FAMILY_AXIS[c][0] == 0 else H)[FAMILY_AXIS[c][1]] for c in comps])
+    x_stored = stored_fields(E, H, comps, tuple((0, n) for n in grid))
     for i, rec in enumerate(recordings):
         Rx = re[rec.state_key] + 1j * im[rec.state_key]  # (nf, nc, *channel)
         y = _random_complex(jax.random.fold_in(ky, i), Rx.shape)
@@ -208,9 +207,7 @@ class TestRawFieldsAreTheIdentity:
         objects, arrays, config = _place((12, 12, 12), _pml(), [(_phasor("mon", (2, 2, 2)), (5, 5, 5))])
         det = objects.detectors[0]
         raw = det.aset("exact_interpolation", False)
-        (wrong,) = channel_recordings(
-            raw, detector_channels(det, "mon"), canonical_components(det), objects=objects, config=config
-        )
+        (wrong,) = channel_recordings(raw, objects, config)
         grid = tuple(int(n) for n in objects.volume.grid_shape)
         E = _random_complex(jax.random.PRNGKey(1), (3, *grid))
         H = _random_complex(jax.random.PRNGKey(2), (3, *grid))
@@ -228,9 +225,7 @@ def test_support_blocks_cover_only_cells_the_stencil_reads():
     """The block is the stencil's reach, inside the (s - 1, e + 1) block FDTDX slices."""
     objects, _arrays, config = _place((12, 12, 12), _pml(), [(_phasor("mon", (3, 3, 3)), (4, 4, 4))])
     det = objects.detectors[0]
-    (rec,) = channel_recordings(
-        det, detector_channels(det, "mon"), canonical_components(det), objects=objects, config=config
-    )
+    (rec,) = channel_recordings(det, objects, config)
     (block,) = rec.blocks
     (sx, ex), (sy, ey), (sz, ez) = det.grid_slice_tuple
     assert block == ((sx - 1, ex), (sy - 1, ey), (sz, ez + 1))
