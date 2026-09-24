@@ -616,3 +616,24 @@ class TestReversibleConductivity:
                 self._trace(True, **kwargs)
         else:
             self._trace(True, **kwargs)
+
+    def test_a_lossy_device_written_after_the_etch_leaves_it_alone(self):
+        """apply_params writes Devices in order: a later lossy Device over the etched one overwrites
+        the shared cells with its own (constant) conductivity, which the etch never reads."""
+        etched = fdtdx.Device(
+            name="etch",
+            partial_grid_shape=(4, 4, 4),
+            partial_voxel_grid_shape=(1, 1, 1),
+            materials={"air": fdtdx.Material()},
+            param_transforms=[],
+            use_etching=True,
+        )
+        shared = fdtdx.Material(permittivity=4.0, electric_conductivity=1e5)
+        lossy = fdtdx.Device(
+            name="lossy",
+            partial_grid_shape=(4, 4, 4),
+            partial_voxel_grid_shape=(1, 1, 1),
+            materials={"a": _LOSSY_SI, "b": shared},
+            param_transforms=[],
+        )
+        self._trace(True, devices=(), extra=((etched, (3, 4, 4)), (lossy, (5, 4, 4))))

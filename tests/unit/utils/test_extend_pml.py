@@ -104,16 +104,19 @@ class TestExtendMaterialToPmlMinus:
         np.testing.assert_allclose(np.asarray(result.initial_inv_permittivities[:, 0:2]), 0.5)
         np.testing.assert_allclose(np.asarray(result.initial_electric_conductivity[:, 0:2]), 0.3)
 
-    @pytest.mark.parametrize("device_x, backed_up", [((1, 4), True), ((3, 6), False)], ids=["in_pml", "clear"])
-    def test_loss_extended_under_an_etched_device_gets_a_backup(self, device_x, backed_up):
+    @pytest.mark.parametrize(
+        "device_x, edge_sigma, backed_up",
+        [((1, 4), 0.3, True), ((1, 4), 0.0, False), ((3, 6), 0.3, False)],
+        ids=["loss_into_the_device", "nothing_lossy_extended", "clear_of_the_pml"],
+    )
+    def test_loss_extended_under_an_etched_device_gets_a_backup(self, device_x, edge_sigma, backed_up):
         """With no conductivity backup (etching could not change it), extending loss under an etched
-        Device makes one, or apply_params would leave the extended loss in etched cells."""
+        Device makes one, or apply_params would leave the extended loss in etched cells; a Device
+        whose cells the extension leaves unchanged gets none."""
         objects, arrays = self._make_setup()
-        pml = objects.pml_objects[0]
-        pml.grid_slice_tuple = ((0, 2), (0, 5), (0, 5))
-        device = MagicMock(use_etching=True, grid_slice_tuple=(device_x, (0, 5), (0, 5)))
+        device = MagicMock(use_etching=True, grid_slice=(slice(*device_x), slice(0, 5), slice(0, 5)))
         objects.devices = [device]
-        sigma = jnp.zeros((1, 10, 5, 5)).at[:, 2].set(0.3)
+        sigma = jnp.zeros((1, 10, 5, 5)).at[:, 2].set(edge_sigma).at[:, 7].set(0.3)  # loss elsewhere too
         arrays = arrays.aset("initial_inv_permittivities", arrays.inv_permittivities)
         arrays = arrays.aset("electric_conductivity", sigma).aset("initial_electric_conductivity", None)
         result = extend_material_to_pml(objects, arrays)

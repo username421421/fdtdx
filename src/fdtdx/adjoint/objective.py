@@ -312,15 +312,19 @@ def target_factor(detector, exact: bool, angular_frequencies: Sequence[float], d
     """``(nf, nc)`` factor taking a stored channel's cotangent to its adjoint current's target DFT.
 
     ``raw_scale`` on every component, since the kernel pairs raw phasors. On a magnetic
-    component also ``-exp(-i w dt / 2)``: the minus sign of Lorentz reciprocity's magnetic
-    pairing, and the half step between the stored post-update H and the injection at
-    ``time_step + 0.5``; with exact interpolation times ``(1 + exp(+i w dt)) / 2``, the DFT
-    of the time average ``(H_prev + H) / 2``.
+    component also ``-exp(-i w dt)``: the minus sign of Lorentz reciprocity's magnetic
+    pairing, and two half steps, one because the stored post-update H lives at ``n + 1/2``
+    but is weighted at ``n``, one because the current enters that same update
+    (``time_step + 0.5``) with its carrier at ``n``. A factor on the target is exact however
+    much the frequencies' windowed spectra overlap; a carrier at the half step, corrected
+    here per target frequency, was off by that overlap times ``(w_f - w_g) dt / 2`` (594 and
+    606 nm at 150 fs: rel 3.5e-03). With exact interpolation also ``(1 + exp(+i w dt)) / 2``,
+    the DFT of the time average ``(H_prev + H) / 2``.
     """
     w = np.asarray(angular_frequencies, dtype=np.float64)
-    half_step = -np.exp(-1j * w * dt / 2.0)
+    half_steps = -np.exp(-1j * w * dt)
     time_average = (1.0 + np.exp(1j * w * dt)) / 2.0
-    magnetic_factor = half_step * time_average if exact else half_step
+    magnetic_factor = half_steps * time_average if exact else half_steps
     is_magnetic = np.asarray([c.startswith("H") for c in canonical_components(detector)])
     return np.where(is_magnetic[None, :], magnetic_factor[:, None], 1.0 + 0.0j) * raw_scale(detector)
 

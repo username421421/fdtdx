@@ -168,10 +168,10 @@ class TestProjectionContract:
 
 class TestSourceContract:
     def test_update_h_is_called_on_the_half_step(self):
-        """The magnetic factor's exp(-i w dt / 2) assumes update_H sees n + 0.5.
+        """The magnetic factor's exp(-i w dt) assumes step n's update_H sees n + 0.5 (floored to n).
 
-        If FDTDX ever passes an integer time_step to update_H, that phase becomes
-        wrong and the H part of every gradient tilts, with no error raised.
+        If FDTDX ever passes another time_step to update_H (n + 1, say), that phase
+        becomes wrong and the H part of every gradient tilts, with no error raised.
         """
         import inspect
 
@@ -180,7 +180,7 @@ class TestSourceContract:
         src = inspect.getsource(upd.update_H)
         assert "time_step + 0.5" in src, (
             "update_H no longer offsets the time step by half; the magnetic adjoint "
-            "factor exp(-i w dt / 2) in fdtdx/adjoint/vjp.py assumes it does"
+            "factor exp(-i w dt) in fdtdx/adjoint/objective.py assumes it does"
         )
 
     def test_source_injection_scales_with_local_inverse_permittivity(self):

@@ -56,6 +56,12 @@ tail was 1.46 at 22 fs, where the gradient was rel 20. With the DC-carrying prod
 the objective tail floors at 3.1e-2 (a static remainder the far-field phasors never lose), so
 that stage keeps warning while the gradient itself converges (5.1e-3 at 320 fs).
 
+The estimate treats the field left at the end as static. A field ringing near an objective
+frequency is underestimated by about `w / |w - w_ring|`: in a periodic cell a diffraction order
+grazing just below an objective frequency never reaches the PML, and a 12^3 test cell (period
+0.92 lambda, 15 fs) was rel 2.2e-01 at a largest tail of 5.0e-03, unflagged (20 fs: 3.4e-02 at
+2.3e-03). Not fixed; documented in docs/source/reciprocity.rst (rerun longer to check).
+
 ## PML warning (`PmlWarning`, same tolerance)
 
 An objective's adjoint current inside a PML breaks the reciprocal pairing, but only where the
@@ -103,6 +109,18 @@ Hx objective: plain sign flip 1.04e-01, with `exp(+i w dt/2)` 2.26e-01, with `ex
 factor `(1 + exp(+i w dt)) / 2` costs rel 8.5e-02 at cosine 0.996 and its conjugate rel
 1.8e-01, both silent; an Hx monitor recorded as if raw was rel 2.0e-01 at cosine 0.980
 (8.3e-07 with both).
+
+Those numbers are from one frequency, with the H current's carrier at update_H's half-integer
+time and one half step in the factor. That is exact only where the amplitude solve is diagonal:
+the solve models integer times, so with several frequencies whose windowed spectra overlap the
+off-diagonal terms kept a phase error `(w_f - w_g) dt / 2`. Measured, silent: Hx at 594/606 nm,
+150 fs, rel 3.5e-03 (scale 1.0035); the periodic mode port 1.7e-03 at 150 fs and 6.8e-05 at
+300 fs, put down to slow ModeOverlap convergence; in 12^3 cells (review, 20 fs) raw (Hx, Hy)
+at 140/160 nm 2.6e-03, Hy at four wavelengths 3.9e-02, a box far field 1.1e-03. Now the carrier
+sits at the integer step for H too and the factor carries both half steps, `-exp(-i w dt)`:
+594/606 nm and the mode port (150 and 300 fs) 2.3e-08 and 1.5e-08; every E-only gradient is
+bit-identical. With it the looser parity gates (1e-4, 1e-3) of the magnetic, near-to-far, flux
+and official-pipeline tests measured 3e-08 to 3.3e-06, and went to 1e-5.
 
 ## Refusals
 

@@ -1,7 +1,8 @@
 """Impressed current with a windowed multi-sinusoid waveform, the adjoint source of reciprocity gradients.
 
-It injects ``J[k](t_n) = window[n] * Re[sum_f amplitudes[f, k] exp(+i w_f t_n)]`` into
-field component ``components[k]`` with :class:`PointDipoleSource`'s injection law,
+It injects ``J[k](t_n) = window[n] * Re[sum_f amplitudes[f, k] exp(+i w_f t_n)]``, ``t_n = n dt``
+for E and H alike (H's update at ``n + 1/2`` included), into field component ``components[k]``
+with :class:`PointDipoleSource`'s injection law,
 ``E <- E - courant * inv_eps * J`` (dually for H), which keeps the discrete Green's
 function symmetric between this source and a phasor detector. The ``window`` makes the
 excitation a decaying pulse so its DFT converges;
@@ -69,8 +70,10 @@ class AdjointCurrentSource(Source):
         """Current at ``time_step`` for the component indices ``components``, ``(len(components), *grid)``."""
         # the simulation's precision, not forced float64, so a float32 run does not downcast
         omega = jnp.asarray(self.angular_frequencies)
-        t = time_step * self._config.time_step_duration
-        phase = jnp.exp(1j * omega * t)
+        # integer time also on update_H's time_step + 0.5, so the current is exactly the one the
+        # amplitude solve models; the magnetic half steps are in fdtdx.adjoint.objective.target_factor
+        step = jnp.floor(time_step)
+        phase = jnp.exp(1j * omega * (step * self._config.time_step_duration))
         lo, hi = components[0], components[-1] + 1
         # contiguous (the canonical E-then-H order) is a plain slice, else a gather
         if tuple(range(lo, hi)) == components:
@@ -78,9 +81,7 @@ class AdjointCurrentSource(Source):
         else:
             amplitudes = self.amplitudes[:, components, ...]
         acc = jnp.tensordot(phase, amplitudes, axes=((0,), (0,)))
-        # update_H runs at time_step + 0.5: the carrier keeps that half-integer time, which
-        # puts the magnetic injection on its half-step; only the envelope index is floored.
-        index = jnp.clip(jnp.floor(time_step).astype(jnp.int32), 0, self.window.shape[0] - 1)
+        index = jnp.clip(step.astype(jnp.int32), 0, self.window.shape[0] - 1)
         return jnp.real(acc) * self.window[index]
 
     def _inject(

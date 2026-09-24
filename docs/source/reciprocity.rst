@@ -41,7 +41,10 @@ What the figure of merit may read
   Device), PML, periodic and PEC/PMC symmetry boundaries, float32 and float64, CPU and GPU.
 
 The gradient is taken with respect to the Device parameters: it is exact there and zero outside
-the Devices, also for ``jax.grad`` with respect to ``arrays.inv_permittivities`` itself.
+the Devices, also for ``jax.grad`` with respect to ``arrays.inv_permittivities`` itself. Only
+``inv_permittivities`` and ``electric_conductivity`` carry it, which is everything
+``apply_params`` writes from Device parameters; a parameter written by hand into another
+material array gets a zero gradient, or raises where listed below.
 
 Refused
 =======
@@ -56,7 +59,8 @@ Each of these was measured to give a silently wrong gradient, so it raises inste
   ``inverse=True``, a ``dft_subsample`` stride below 4 samples per period;
 * grids whose cell width varies along an axis, nonzero Bloch vectors, full 3x3 material tensors,
   dispersive Device materials;
-* a Device overlapping a PML, or containing a stock source, a mode source or a mode port;
+* a Device overlapping a PML or containing a stock source (:func:`fdtdx.reciprocity_param_fn`,
+  which applies mode ports once at setup, also refuses a mode port inside a Device);
 * a run too short to separate the objective frequencies (amplitude solve condition above 1e4).
 
 Accuracy
@@ -65,7 +69,11 @@ Accuracy
 Reciprocity equals automatic differentiation up to the truncation of the run's discrete Fourier
 transforms, so let the fields leave the domain. A ``ConvergenceWarning`` reports phasors that have
 not converged, and a ``PmlWarning`` an objective whose adjoint current reaches the lossy part of a
-PML. Two things matter in practice:
+PML. The convergence estimate assumes the field left at the end does not oscillate near an
+objective frequency; in a periodic cell, a diffraction order grazing near one rings without ever
+reaching the PML and is not flagged (a 22% gradient error at a tail estimate of 5e-3 in a small
+test cell). There, check convergence by rerunning with a longer simulation. Two more things
+matter in practice:
 
 * **The source spectrum.** A few-cycle Gaussian pulse carries a DC component whose static remainder
   never decays; in a structural-colour splitter it floored every gradient method, checkpointed

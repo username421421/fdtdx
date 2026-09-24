@@ -6,7 +6,6 @@ from typing import cast
 import numpy as np
 
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
-from fdtdx.objects.object import slices_overlap
 from fdtdx.objects.static_material.static import UniformMaterialObject
 
 
@@ -87,6 +86,7 @@ def extend_material_to_pml(
             material values that would be overwritten.
     """
     volume = cast(UniformMaterialObject, objects.volume)
+    placed_sigma = arrays.electric_conductivity
     for pml in objects.pml_objects:
         axis = pml.axis
         direction = pml.direction
@@ -161,15 +161,11 @@ def extend_material_to_pml(
 
     # an etched scene keeps no conductivity backup where etching cannot change it (_init_arrays);
     # loss extended under an etched Device can, so it gets one
-    etched_in_pml = any(
-        d.use_etching and slices_overlap(d.grid_slice_tuple, pml.grid_slice_tuple)
-        for d in objects.devices
-        for pml in objects.pml_objects
-    )
-    if (
-        etched_in_pml
-        and arrays.electric_conductivity is not None
-        and getattr(arrays, "initial_electric_conductivity", 0) is None
-    ):
-        arrays = arrays.aset("initial_electric_conductivity", arrays.electric_conductivity)
+    sigma = arrays.electric_conductivity
+    if sigma is not None and placed_sigma is not None and getattr(arrays, "initial_electric_conductivity", 0) is None:
+        if any(
+            d.use_etching and bool((sigma[:, *d.grid_slice] != placed_sigma[:, *d.grid_slice]).any())
+            for d in objects.devices
+        ):
+            arrays = arrays.aset("initial_electric_conductivity", sigma)
     return arrays

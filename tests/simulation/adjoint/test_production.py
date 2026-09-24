@@ -86,6 +86,9 @@ def _scene(
     grid=None,
     device_material=None,
     lead_wavelengths=None,
+    wavelengths=_WL,
+    etched=False,
+    symmetry=(0, 0, 0),
 ):
     """24^3 test scene.
 
@@ -102,6 +105,8 @@ def _scene(
     ``grid`` replaces the 50 nm cubes; objects are then placed by physical margins.
     ``device_material`` replaces the Devices' ``si`` (eps 2.25) material. ``lead_wavelengths``
     adds a one-cell monitor ``"lead"`` at those wavelengths, listed before ``"mon"``.
+    ``wavelengths`` are the monitors' (the source stays a 0.1 f0 pulse at 600 nm). ``etched``
+    makes the Devices etch ``device_material`` (air by default) into what lies below them.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
@@ -112,6 +117,7 @@ def _scene(
         dtype=jnp.float64,
         courant_factor=0.99,
         gradient_config=None,
+        symmetry=symmetry,
     )
     objs, cons = [], []
     vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
@@ -134,15 +140,20 @@ def _scene(
 
     if devices:
         for name, lower, shape in devices:
+            if etched:
+                materials = {"etch": device_material or fdtdx.Material(permittivity=1.0)}
+            else:
+                materials = {
+                    "air": fdtdx.Material(permittivity=1.0),
+                    "si": device_material or fdtdx.Material(permittivity=2.25),
+                }
             device = fdtdx.Device(
                 name=name,
                 partial_grid_shape=shape,
                 partial_voxel_grid_shape=(1, 1, 1),
-                materials={
-                    "air": fdtdx.Material(permittivity=1.0),
-                    "si": device_material or fdtdx.Material(permittivity=2.25),
-                },
+                materials=materials,
                 param_transforms=[],
+                use_etching=etched,
             )
             place(device, lower)
     else:
@@ -156,7 +167,7 @@ def _scene(
     src, _ = _narrowband_dipole("src", source_cell)
     place(src, source_cell)
 
-    wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+    wcs = [fdtdx.WaveCharacter(wavelength=w) for w in wavelengths]
     if lead_wavelengths is not None:
         lead_wcs = [fdtdx.WaveCharacter(wavelength=w) for w in lead_wavelengths]
         place(fdtdx.PhasorDetector(name="lead", partial_grid_shape=(1, 1, 1), wave_characters=lead_wcs), _MON)
@@ -336,7 +347,7 @@ class TestOfficialPipelineParity:
         rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
         cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
         sign = float((jnp.sign(a) == jnp.sign(b)).mean())
-        assert rel < 1e-4, f"parameter gradient rel_L2 = {rel:.3e}"
+        assert rel < 1e-5, f"parameter gradient rel_L2 = {rel:.3e}"
         assert cos > 1 - 1e-6, f"cosine {cos:.10f}"
         assert sign > 0.99, f"sign agreement {sign:.4f}"
 
@@ -380,7 +391,7 @@ class TestMaterialAndGeometryCoverage:
         unity by more than 1.
         """
         rel = self._rel_against_checkpointed(sigma=sigma)
-        assert rel < 1e-3, f"rel={rel:.3e} at sigma={sigma}"
+        assert rel < 1e-5, f"rel={rel:.3e} at sigma={sigma}"
 
     def test_frozen_source_inside_design_region_is_refused(self):
         """Stock sources freeze their inv_eps factor, so overlap is refused.
@@ -436,11 +447,14 @@ class TestMagneticComponents:
 
     Box-mode field projection concatenates E and H, so its adjoint source drives
     all six components. Magnetic components carry an extra factor
-    ``-exp(-i w dt / 2)``: the minus from Lorentz reciprocity's asymmetry between
-    the electric and magnetic pairings, and the half-step because the detector
-    stores the post-update H (living at n+1/2) but weights it with the
-    integer-step kernel. Measured on an Hx objective: no factor 1.91 at cosine
-    -0.998, sign flip alone 1.04e-01, both 6.3e-07 at cosine 1.000000000.
+    ``-exp(-i w dt)``: the minus from Lorentz reciprocity's asymmetry between
+    the electric and magnetic pairings, and two half steps: the detector stores
+    the post-update H (living at n+1/2) but weights it with the integer-step
+    kernel, and the current enters that update with its carrier at n. Measured
+    on an Hx objective: no factor 1.91 at cosine -0.998, sign flip alone
+    1.04e-01, both 6.3e-07 at cosine 1.000000000 (then with the carrier on the
+    half step and one half step in the factor, which is exact at one frequency
+    only: two close ones were rel 3.5e-03, ``test_two_close_frequencies``).
 
     Until the ``_scene`` fix that came with this docstring, ``components`` was
     accepted by ``_scene`` but never passed to the monitor, so every case here
@@ -492,8 +506,14 @@ class TestMagneticComponents:
         a, b = g_rec[:, *gs], g_off[:, *gs]
         rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
         cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
-        assert rel < 1e-4, f"{components}: rel={rel:.3e}"
+        assert rel < 1e-5, f"{components}: rel={rel:.3e}"
         assert cos > 1 - 1e-8, f"{components}: cosine {cos:.10f}"
+
+    @pytest.mark.parametrize("components", [("Hx",), ("Ez", "Hx")], ids=["Hx", "Ez_Hx"])
+    def test_two_close_frequencies(self, components):
+        """594 and 606 nm: their windowed spectra overlap, so the amplitude solve couples them, and
+        the H current's timing must be inside the solve, not a per-frequency factor on its target."""
+        _assert_device_parity(components=components, wavelengths=(594e-9, 606e-9))
 
     def test_magnetic_sign_flip_is_actually_needed(self):
         """Guard against someone 'simplifying' the magnetic factor away.
@@ -508,7 +528,7 @@ class TestMagneticComponents:
         factor = target_factor(objects["mon"], exact=False, angular_frequencies=_OMEGAS, dt=dt)
         magnetic = factor[:, 1]
         np.testing.assert_allclose(factor[:, 0], 1.0)
-        np.testing.assert_allclose(magnetic, -np.exp(-1j * np.asarray(_OMEGAS) * dt / 2.0))
+        np.testing.assert_allclose(magnetic, -np.exp(-1j * np.asarray(_OMEGAS) * dt))
         assert np.all(magnetic.real < 0), "the magnetic factor must carry the reciprocity sign"
         assert not np.allclose(magnetic, -1.0), "the half-step phase must not be dropped"
 
@@ -643,7 +663,7 @@ class TestNearToFar:
         a, b = g_rec[:, *gs], g_off[:, *gs]
         rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
         cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
-        assert rel < 1e-4, f"near-to-far gradient rel_L2 = {rel:.3e}"
+        assert rel < 1e-5, f"near-to-far gradient rel_L2 = {rel:.3e}"
         assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
 
     def test_exact_faces_get_the_stencil_support(self):
@@ -813,7 +833,7 @@ class TestFluxAndEnergyObjectives:
         a, b = g_rec[:, *gs], g_off[:, *gs]
         rel = float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
         cos = float(jnp.sum(a * b) / (jnp.linalg.norm(a) * jnp.linalg.norm(b)))
-        assert rel < 1e-4, f"{kind}: rel_L2 = {rel:.3e}"
+        assert rel < 1e-5, f"{kind}: rel_L2 = {rel:.3e}"
         assert cos > 1 - 1e-8, f"{kind}: cosine {cos:.10f}"
 
     def test_closed_box_uses_one_adjoint_source_per_face(self):
@@ -1159,11 +1179,12 @@ class TestStockObjectives:
 
         FoM is the mode power through FDTDX's own ``compute_overlap``. The port
         spans the periodic axis, so its stencil takes FDTDX's padded
-        whole-domain path and wraps. Measured on the GPU (float64, 300 fs):
-        rel 6.8e-05 at cosine 0.9999999986; ModeOverlap gradients converge
-        more slowly than the FoM (1.7e-03 at 150 fs).
+        whole-domain path and wraps. Measured (CPU, float64): rel 2.3e-08 at
+        150 fs and 1.5e-08 at 300 fs. Before the magnetic current's carrier moved
+        to integer time it was 1.7e-03 and 6.8e-05, put down to slow ModeOverlap
+        convergence; it was that two-frequency H error (TestMagneticComponents).
         """
-        objects, arrays, params, config = _periodic_mode_scene(sim_fs=300.0)
+        objects, arrays, params, config = _periodic_mode_scene(sim_fs=150.0)
         port = next(d for d in objects.detectors if d.name == "out")
         assert port.exact_interpolation and port.grid_slice_tuple[1] == (0, 2)
 
@@ -1174,8 +1195,8 @@ class TestStockObjectives:
             objects, arrays, params, config, power, lambda det, out: power(det, {"phasor": out}), "out"
         )
         assert same, "the forward value must be bit-identical to run_fdtd's"
-        assert rel < 3e-4, f"mode port: rel_L2 = {rel:.3e} (scale {scale:.6f})"
-        assert cos > 1 - 1e-7, f"cosine {cos:.10f}"
+        assert rel < 1e-6, f"mode port: rel_L2 = {rel:.3e} (scale {scale:.6f})"
+        assert cos > 1 - 1e-10, f"cosine {cos:.10f}"
 
     def test_box_far_field_through_param_fn(self):
         """FieldProjectionAngleDetector box, stock settings, 5 faces, UniformPlaneSource(normalize_by_energy).
@@ -1194,12 +1215,13 @@ class TestStockObjectives:
         assert rel < 1e-5, f"box far field: rel_L2 = {rel:.3e} (scale {scale:.6f})"
         assert cos > 1 - 1e-8, f"cosine {cos:.10f}"
 
-    def test_monitor_on_an_electric_symmetry_plane(self):
+    @pytest.mark.parametrize("plane, polarization", [(-1, (1, 0, 0)), (1, (0, 1, 0))], ids=["pec", "pmc"])
+    def test_monitor_on_a_symmetry_plane(self, plane, polarization):
         """``config.symmetry`` puts the monitor's stencil through FDTDX's mirror padding.
 
-        24^3 reduced to 12x24x24 by a PEC plane that the Device and a stock
-        monitor both straddle. Measured on the GPU (float64): rel 4.1e-07, and
-        3.8e-07 for the same scene without symmetry.
+        24^3 reduced to 12x24x24 by a PEC (E normal to it) or PMC (E along it) plane that
+        the Device and a stock monitor both straddle. Measured on the GPU (float64), PEC:
+        rel 4.1e-07, and 3.8e-07 for the same scene without symmetry.
         """
         wl0 = 600e-9
         config = SimulationConfig(
@@ -1209,7 +1231,7 @@ class TestStockObjectives:
             dtype=jnp.float64,
             courant_factor=0.99,
             gradient_config=None,
-            symmetry=(-1, 0, 0),
+            symmetry=(plane, 0, 0),
         )
         vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
         objs, cons = [vol], []
@@ -1237,7 +1259,7 @@ class TestStockObjectives:
                 name="source",
                 partial_grid_shape=(_N, _N, 1),
                 direction="+",
-                fixed_E_polarization_vector=(1, 0, 0),
+                fixed_E_polarization_vector=polarization,
                 wave_character=wc,
                 temporal_profile=fdtdx.GaussianPulseProfile(
                     center_wave=wc, spectral_width=fdtdx.WaveCharacter(frequency=0.3 * float(c0 / wl0))
@@ -1505,6 +1527,12 @@ _AROUND_MON = ((17, 10, 10), (3, 5, 5))
 # monitor at (18, 11..13, 12).
 _HALF_MON = ((17, 12, 10), (3, 3, 5))
 _ANISO = fdtdx.Material(permittivity=(2.0, 3.0, 4.0))
+_LORENTZ = fdtdx.Material(
+    permittivity=2.0,
+    dispersion=fdtdx.DispersionModel(
+        poles=(fdtdx.LorentzPole(resonance_frequency=1.3 * _OMEGAS[0], damping=0.1 * _OMEGAS[0], delta_epsilon=0.5),)
+    ),
+)
 
 
 class TestLossyMonitor:
@@ -1551,7 +1579,9 @@ class TestAnisotropicAndMagneticMaterials:
     rel 2.0e-01 (scale 1.17) at the stock monitor and 9.4e-01 (scale 1.92) at the raw one; the
     lossy divisor read from row 0, rel 2.1e-01 (scale 0.80); the H current ignoring
     ``inv_mu``, a pure scale 2.0 at cosine 1.0; a lossy Device's conductivity gradient summed
-    to one row in a three-row scene, rel 2.4 (scale 3.4).
+    to one row in a three-row scene, rel 2.4 (scale 3.4). The last five (anisotropic Device and
+    magnetic materials, a dispersive block the fields cross, etched Devices) were each claimed
+    supported with no test; they measured 3e-07 to 5e-06.
     """
 
     @pytest.mark.parametrize(
@@ -1584,6 +1614,37 @@ class TestAnisotropicAndMagneticMaterials:
                 components=("Ex", "Ey", "Ez"),
                 device_material=fdtdx.Material(permittivity=2.25, electric_conductivity=1e5),
             ),
+            dict(
+                device_material=fdtdx.Material(permittivity=(2.0, 3.0, 4.0), electric_conductivity=(1e5, 2e5, 3e5)),
+                components=("Ex", "Ey", "Ez"),
+            ),
+            dict(
+                extra_blocks=[
+                    (
+                        "mu",
+                        *_AROUND_MON,
+                        fdtdx.Material(permeability=(1.0, 2.0, 3.0), magnetic_conductivity=(2e9, 4e9, 6e9)),
+                    )
+                ],
+                components=("Hx", "Hy"),
+            ),
+            dict(extra_blocks=[("lorentz", (_DES_LO + _DES_SPAN, 10, 10), (2, 5, 5), _LORENTZ)]),
+            dict(
+                etched=True,
+                extra_blocks=[
+                    (
+                        "core",
+                        (_DES_LO,) * 3,
+                        (_DES_SPAN,) * 3,
+                        fdtdx.Material(permittivity=4.0, electric_conductivity=1e5),
+                    )
+                ],
+            ),
+            dict(
+                etched=True,
+                device_material=fdtdx.Material(permittivity=1.5, electric_conductivity=1e5),
+                extra_blocks=[("core", (_DES_LO,) * 3, (_DES_SPAN,) * 3, fdtdx.Material(permittivity=4.0))],
+            ),
         ],
         ids=[
             "eps_under_the_device",
@@ -1591,6 +1652,11 @@ class TestAnisotropicAndMagneticMaterials:
             "sigma_at_a_raw_monitor",
             "mu_at_an_hx_monitor",
             "lossy_device_in_a_three_row_sigma_scene",
+            "anisotropic_lossy_device_material",
+            "anisotropic_mu_and_sigma_h_at_an_h_monitor",
+            "lorentz_block_on_the_path",
+            "air_etched_into_a_lossy_core",
+            "lossy_material_etched_into_a_lossless_core",
         ],
     )
     def test_matches_official(self, scene_kwargs):
@@ -1657,14 +1723,6 @@ class TestConvergenceDiagnostic:
         _, g_off = _official_param_grad(*scene)
         rel, cos, _ = _parity_metrics(g_off, g_rec)
         assert rel > 1e-2, f"the 25 fs gradient was expected to be off, rel {rel:.3e} cos {cos:.6f}"
-
-
-_LORENTZ = fdtdx.Material(
-    permittivity=2.0,
-    dispersion=fdtdx.DispersionModel(
-        poles=(fdtdx.LorentzPole(resonance_frequency=1.3 * _OMEGAS[0], damping=0.1 * _OMEGAS[0], delta_epsilon=0.5),)
-    ),
-)
 
 
 class TestDispersiveBlockUnderDevice:

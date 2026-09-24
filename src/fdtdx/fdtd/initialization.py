@@ -1134,8 +1134,8 @@ def _init_arrays(
     initial_inv_permittivities = jnp.copy(inv_permittivities) if using_etching else None
 
     # and of the conductivity, unless etching cannot change it: every etched Device's background, as
-    # placed and as any Device over it writes it, has its etch material's conductivity. Etching then
-    # leaves it as placed, independent of the parameters
+    # placed and as any Device written before it (apply_params' order) leaves it, has its etch
+    # material's conductivity. Etching then leaves it as placed, independent of the parameters
     def _etches_loss(device) -> bool:
         assert electric_conductivity is not None and conductivity_spacing is not None
 
@@ -1146,11 +1146,8 @@ def _init_arrays(
             )
 
         etch = allowed(device)[0]
-        over = [
-            d
-            for d in objects.devices
-            if d is not device and slices_overlap(d.grid_slice_tuple, device.grid_slice_tuple)
-        ]
+        earlier = objects.devices[: next(i for i, d in enumerate(objects.devices) if d is device)]
+        over = [d for d in earlier if slices_overlap(d.grid_slice_tuple, device.grid_slice_tuple)]
         if any(row != etch for d in over for row in allowed(d)):
             return True
         etch = (jnp.array(etch, dtype=config.dtype) * conductivity_spacing)[:, None, None, None]
