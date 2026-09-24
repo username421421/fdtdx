@@ -220,9 +220,14 @@ objective monitor in the PML is not refused; it raises a `PmlWarning` (see above
 Reading the current array instead etched it again on every application to returned arrays
 (an optimization loop feeding `run_fdtd`'s output back): Device mean 2.49e-03, 1.47e-03,
 9.58e-04 over three applications with the same parameters, FoM -2.31e-03 to -6.32e-03.
-Where every etched Device's placed background already has its etch material's conductivity
-(checked on the concrete placed arrays), no backup is kept and etching leaves it as placed.
-`extend_material_to_pml` extends both backups, or `apply_params` restoring them undid it.
+Where etching cannot change the conductivity, no backup is kept and etching leaves it as placed:
+every etched Device's placed background (checked on the concrete placed arrays) and every Device
+overlapping it have its etch material's conductivity. Checking the placed arrays alone left a
+lossy Device's 1e5 S/m in fully etched cells above it, at eps 1. `extend_material_to_pml` extends
+both backups, or `apply_params` restoring them undid it, and makes the conductivity backup when
+it extends loss under an etched Device. The choice is per scene: once one etched Device etches
+loss, a reversible gradient through any etched Device raises (loudly; checkpointed and
+reciprocity are exact there).
 
 **`GradientConfig("reversible")`** does not differentiate the conductivity; it closes over it.
 Once `apply_params` wrote it, any conductive scene with a Device made it a function of the

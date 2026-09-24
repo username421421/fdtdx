@@ -65,6 +65,17 @@ production checkpointed 8.37 s (7.1x). Fabrication (25 nm, 120 fs, 10.8 M cells)
 reciprocity 27.5 s, production checkpointed (3 checkpoints, the preset's setting) ~4000 s per
 call (~145x).
 
+## An optimization with each gradient
+
+Their production value-and-gradient, and the same scene with the one string changed, driven by
+the same simple optimizer (nlopt is not in the fork venv, so not their MMA): projected normalized
+ascent `x <- clip(x + 0.05 g / max|g|, 0, 1)`, 15 steps from their `_initialize_raw` start at the
+epoch-1 values (beta 4), balanced preset, user's pulse, 80 fs, float32, GPU (session scratchpad
+`cstraj/`). FoM -1.622 -> +1.1147 (checkpointed) and -1.622 -> +1.1140 (reciprocity): gain ratio
+0.9997, the per-step FoM gap at most 3.6e-03 and shrinking to 6.9e-04 by step 15, final designs
+0.9% of the distance travelled apart. Wall time for the 16 evaluations with compile: 154 s
+against 37 s.
+
 ## Recommendation
 
 DC-free pulse + 160 fs: reciprocity within 9e-4 of the converged gradient at ~2.3 s per call,

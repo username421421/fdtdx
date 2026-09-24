@@ -156,3 +156,43 @@ def test_etched_conductivity_is_reapplied_from_the_placed_background():
     np.testing.assert_allclose(once.electric_conductivity[cells], 0.75 * placed, rtol=1e-6)
     np.testing.assert_array_equal(twice.electric_conductivity, once.electric_conductivity)
     np.testing.assert_array_equal(twice.inv_permittivities, once.inv_permittivities)
+
+
+def test_etching_a_lossy_device_below_etches_its_conductivity():
+    """An etched Device over a lossless background but over a lossy Device written before it: the
+    placed background says etching changes nothing, the Device below says otherwise. Fully etched
+    cells kept that Device's 1e5 S/m at eps 1, silently."""
+    config = fdtdx.SimulationConfig(time=10e-15, grid=fdtdx.UniformGrid(spacing=50e-9), backend="cpu")
+    volume = fdtdx.SimulationVolume(partial_grid_shape=(12, 12, 12))
+    lossy = {
+        "a": fdtdx.Material(permittivity=2.25, electric_conductivity=1e5),
+        "b": fdtdx.Material(permittivity=4.0, electric_conductivity=1e5),
+    }
+    base = fdtdx.Device(
+        name="base",
+        partial_grid_shape=(4, 4, 4),
+        partial_voxel_grid_shape=(1, 1, 1),
+        materials=lossy,
+        param_transforms=[],
+    )
+    etch = fdtdx.Device(
+        name="etch",
+        partial_grid_shape=(4, 4, 4),
+        partial_voxel_grid_shape=(1, 1, 1),
+        materials={"air": fdtdx.Material()},
+        param_transforms=[],
+        use_etching=True,
+    )
+    constraints = [
+        o.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(4, 4, 4)) for o in (base, etch)
+    ]
+    key = jax.random.PRNGKey(0)
+    objects, arrays, params, config, _ = fdtdx.place_objects(
+        object_list=[volume, base, etch], config=config, constraints=constraints, key=key
+    )
+    assert arrays.initial_electric_conductivity is not None
+    params = {"base": jnp.full_like(params["base"], 0.5), "etch": jnp.full_like(params["etch"], 1.0)}
+    applied, _, _ = fdtdx.apply_params(arrays, objects, params, key)
+    cells = (slice(None), slice(4, 8), slice(4, 8), slice(4, 8))
+    np.testing.assert_allclose(np.asarray(applied.inv_permittivities[cells]), 1.0, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(applied.electric_conductivity[cells]), 0.0, atol=1e-12)

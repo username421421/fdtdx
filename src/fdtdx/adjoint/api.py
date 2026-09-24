@@ -159,6 +159,7 @@ def reciprocity_param_fn(
         NotImplementedError: for a dispersive Device material, or an applied object inside a Device.
         ValueError: if ``design_detector`` leaves Device cells uncovered.
     """
+    validation.check_device_materials(objects)  # also in reciprocity_phasor_fn; here before the mode solves
     if design_detector is not None:
         validation.check_coverage(objects, design_regions(objects, design_detector), design_detector, refuse=True)
     # as apply_params leaves it, for the objects applied once below

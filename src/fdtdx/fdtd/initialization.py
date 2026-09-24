@@ -1132,15 +1132,27 @@ def _init_arrays(
     using_etching = any(d.use_etching for d in objects.devices)
     initial_inv_permittivities = jnp.copy(inv_permittivities) if using_etching else None
 
-    # and of the conductivity, unless every etched Device's background already has its etch
-    # material's: then etching leaves it as placed, independent of the parameters
+    # and of the conductivity, unless etching cannot change it: every etched Device's background, as
+    # placed and as any Device over it writes it, has its etch material's conductivity. Etching then
+    # leaves it as placed, independent of the parameters
     def _etches_loss(device) -> bool:
         assert electric_conductivity is not None and conductivity_spacing is not None
-        etch = compute_allowed_electric_conductivities(
-            device.materials,
-            isotropic=electric_conductivity.shape[0] == 1,
-            diagonally_anisotropic=electric_conductivity.shape[0] == 3,
-        )[0]
+
+        def allowed(d):
+            rows = electric_conductivity.shape[0]
+            return compute_allowed_electric_conductivities(
+                d.materials, isotropic=rows == 1, diagonally_anisotropic=rows == 3
+            )
+
+        etch = allowed(device)[0]
+        over = [
+            d
+            for d in objects.devices
+            if d is not device
+            and all(a < z and b < y for (a, y), (b, z) in zip(d.grid_slice_tuple, device.grid_slice_tuple))
+        ]
+        if any(row != etch for d in over for row in allowed(d)):
+            return True
         etch = (jnp.array(etch, dtype=config.dtype) * conductivity_spacing)[:, None, None, None]
         return bool(jnp.any(electric_conductivity[:, *device.grid_slice] != etch))
 
