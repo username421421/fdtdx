@@ -36,6 +36,21 @@ def _reversible_slice_boundaries(time_steps_total: int, num_slices: int) -> list
     return [round(i * time_steps_total / num_slices) for i in range(num_slices + 1)]
 
 
+@jax.custom_jvp
+def _conductivity_not_differentiated(electric_conductivity: jax.Array) -> jax.Array:
+    """The identity; differentiating through it raises, since the reversible gradient omits the conductivity."""
+    return electric_conductivity
+
+
+@_conductivity_not_differentiated.defjvp
+def _conductivity_not_differentiated_jvp(primals, tangents):
+    raise NotImplementedError(
+        "GradientConfig(method='reversible') does not differentiate the electric conductivity, and this one "
+        "depends on the parameters: apply_params writes it from a lossy Device material or an etched Device. "
+        "Use GradientConfig(method='checkpointed') or GradientConfig(method='reciprocity')."
+    )
+
+
 def reversible_fdtd(
     arrays: ArrayContainer,
     objects: ObjectContainer,
@@ -87,7 +102,8 @@ def reversible_fdtd(
     Raises:
         NotImplementedError: If the simulation contains dispersive materials. Reversing
             the ADE polarization recurrence is not supported; use the ``"checkpointed"``
-            gradient method for dispersive simulations.
+            gradient method for dispersive simulations. Also when differentiated with an
+            electric conductivity that depends on the parameters (a lossy or etched Device).
     """
     # if arrays.magnetic_conductivity is not None or arrays.electric_conductivity is not None:
     #     raise Exception(f"Reversible FDTD does not work with Conductive Materials")
@@ -100,6 +116,9 @@ def reversible_fdtd(
             "Dispersive time-reversible gradient computation under active development. "
             "Use GradientConfig(method='checkpointed') instead."
         )
+    if arrays.electric_conductivity is not None:
+        # closed over below; one depending on the parameters would otherwise escape the VJP as a tracer
+        arrays = arrays.aset("electric_conductivity", _conductivity_not_differentiated(arrays.electric_conductivity))
 
     arrays = arrays.reset()
 
@@ -198,6 +217,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            initial_electric_conductivity=arrays.initial_electric_conductivity,
         )
         state = reversible_fdtd_base(arr)
         return (
@@ -290,6 +310,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            initial_electric_conductivity=arrays.initial_electric_conductivity,
         )
 
         # For a single slice ``checkpoints`` is empty and the reverse loop runs the unmodified
@@ -356,6 +377,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            initial_electric_conductivity=arrays.initial_electric_conductivity,
         )
         s_k, checkpoints = segmented_forward(arr)
 
@@ -414,6 +436,7 @@ def reversible_fdtd(
         electric_conductivity=arrays.electric_conductivity,
         magnetic_conductivity=arrays.magnetic_conductivity,
         initial_inv_permittivities=arrays.initial_inv_permittivities,
+        initial_electric_conductivity=arrays.initial_electric_conductivity,
     )
     return time_step, out_arrs
 

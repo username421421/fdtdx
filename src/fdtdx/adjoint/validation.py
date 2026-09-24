@@ -98,6 +98,7 @@ def _check_objective_settings(det: PhasorDetector, name: str) -> None:
             "dft_subsample='auto' or a smaller stride.",
         ),
         (det.reduce_volume, "must have reduce_volume=False."),
+        (det.inverse, "has inverse=True: it records during a backward run only, so a forward run stores nothing."),
     )
     for refused, why in refusals:
         if refused:
@@ -107,23 +108,8 @@ def _check_objective_settings(det: PhasorDetector, name: str) -> None:
 def _stretched_axes(config: SimulationConfig) -> list[str]:
     """The axes whose cell widths vary, at ``RectilinearGrid``'s own uniformity tolerance."""
     grid = config.resolved_grid
-    # one width per axis: unresolved (UniformGrid, QuasiUniformGrid) or uniform, which is static
-    # even when a config.aset under jit has traced the edges
-    if grid is None or grid._is_uniform:
-        return []
-    if is_jax_tracer(grid.x_edges):
-        raise ValueError(
-            "The config's grid edges are traced (config.aset inside jax.jit copies them), so its cell widths cannot "
-            "be checked. Build the SimulationConfig, GradientConfig included, outside the jitted function."
-        )
-    out = []
-    for axis in range(3):
-        edges = np.asarray(grid.edges(axis))
-        widths = np.diff(edges)
-        roundoff = 8.0 * float(np.finfo(edges.dtype).eps) * float(np.abs(edges).max())
-        if np.abs(widths - widths[0]).max() > 1e-4 * widths[0] + roundoff:
-            out.append(f"{'xyz'[axis]} ({widths.min():.3e} to {widths.max():.3e} m)")
-    return out
+    # static, so also known when a config.aset under jit has traced the edges
+    return [] if grid is None else ["xyz"[axis] for axis, uniform in enumerate(grid._uniform_axes) if not uniform]
 
 
 def check_scene(objects: ObjectContainer, arrays: ArrayContainer, config: SimulationConfig) -> None:
@@ -260,6 +246,22 @@ def check_device_materials(objects: ObjectContainer) -> None:
             "dependence of inv_permittivities only, not of the dispersion coefficients apply_params also writes, "
             f"so the value and the gradient would both be wrong. Use {_CHECKPOINTED}."
         )
+
+
+def conductive_devices(objects: ObjectContainer, arrays: ArrayContainer) -> list[str]:
+    """The Devices whose cells ``apply_params`` gives a conductivity other than the placed one.
+
+    A lossy Device material, or loss placed under a Device (``apply_params`` replaces it).
+    """
+    sigma = arrays.electric_conductivity
+    if sigma is None:
+        return []
+    return [
+        str(dev.name)
+        for dev in objects.devices
+        if any(np.any(np.asarray(m.electric_conductivity) != 0) for m in dev.materials.values())
+        or (not is_jax_tracer(sigma) and bool(np.any(np.asarray(sigma[:, *dev.grid_slice]) != 0)))
+    ]
 
 
 def check_applied_outside_devices(objects: ObjectContainer) -> None:

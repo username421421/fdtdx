@@ -225,6 +225,13 @@ def dft_tail(
     return jnp.max(eta)
 
 
+def _silence(category: type[Warning]) -> str:
+    return (
+        "Silence it with tail_tolerance=None or, under GradientConfig(method='reciprocity'), with "
+        f"warnings.filterwarnings('ignore', category=fdtdx.adjoint.{category.__name__})."
+    )
+
+
 _TAIL_WHAT = {
     "objective_tail": "objective phasors",
     "forward_design_tail": "forward design-region phasors",
@@ -253,7 +260,7 @@ class TailReport:
                     f"A share {tails[worst]:.1e} of the adjoint current for {worst!r}, weighted by the local PML "
                     "strength, lies inside a PML, where the reciprocal pairing does not hold; the gradient error "
                     "is of that order or below. Keep objective monitors out of the PML (its first cell is "
-                    "harmless); pass tail_tolerance=None to silence this.",
+                    f"harmless). {_silence(PmlWarning)}",
                     PmlWarning,
                     stacklevel=2,
                 )
@@ -266,7 +273,7 @@ class TailReport:
             warnings.warn(
                 f"The {_TAIL_WHAT[stage]} have not converged: DFT tail estimate {tails[worst]:.2e} for {worst!r} exceeds "
                 f"tail_tolerance={self.tolerance:.1e} (all: {listed}). {meaning} Lengthen the simulation so "
-                "the fields leave the domain; pass tail_tolerance=None to silence this.",
+                f"the fields leave the domain. {_silence(ConvergenceWarning)}",
                 ConvergenceWarning,
                 stacklevel=2,
             )

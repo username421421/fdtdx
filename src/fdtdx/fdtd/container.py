@@ -424,6 +424,10 @@ class ArrayContainer(TreeClass):
     #: Only used when etching a device.
     initial_inv_permittivities: jax.Array | None = None
 
+    #: Backup of the electric conductivity array, the background an etched device interpolates from.
+    #: Only used when etching a device in a conductive simulation.
+    initial_electric_conductivity: jax.Array | None = None
+
     def reset(
         self,
         reset_detector_states: bool = True,

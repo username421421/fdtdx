@@ -113,3 +113,46 @@ def test_lossy_device_matches_static_block():
     np.testing.assert_allclose(lossy_E, static_E, rtol=1e-5, atol=1e-6 * float(jnp.abs(static_E).max()))
     # and the loss is real (it used to be dropped: the fields equalled the lossless ones)
     assert float(jnp.sum(lossy_E**2)) < 0.9 * float(jnp.sum(lossless_E**2))
+
+
+def test_etched_conductivity_is_reapplied_from_the_placed_background():
+    """An etched Device interpolates the conductivity from the placed background, like the
+    permittivity. Applying the same parameters again to returned arrays (an optimization loop
+    feeding run_fdtd's output back) used to etch the etched conductivity again: 2.5e-3, 1.5e-3,
+    9.6e-4 over three applications."""
+    gradient_config = fdtdx.GradientConfig(method="reversible", recorder=fdtdx.Recorder(modules=[]))
+    config = fdtdx.SimulationConfig(
+        time=10e-15, grid=fdtdx.UniformGrid(spacing=50e-9), backend="cpu", gradient_config=gradient_config
+    )
+    volume = fdtdx.SimulationVolume(partial_grid_shape=(12, 12, 12))
+    block = fdtdx.UniformMaterialObject(
+        name="bg",
+        partial_grid_shape=(4, 4, 4),
+        material=fdtdx.Material(permittivity=2.25, electric_conductivity=1e5),
+    )
+    etch = fdtdx.Device(
+        name="etch",
+        partial_grid_shape=(4, 4, 4),
+        partial_voxel_grid_shape=(1, 1, 1),
+        materials={"air": fdtdx.Material()},
+        param_transforms=[],
+        use_etching=True,
+    )
+    constraints = [
+        o.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(4, 4, 4)) for o in (block, etch)
+    ]
+    key = jax.random.PRNGKey(0)
+    objects, arrays, params, config, _ = fdtdx.place_objects(
+        object_list=[volume, block, etch], config=config, constraints=constraints, key=key
+    )
+    params = {"etch": jnp.full_like(params["etch"], 0.25)}
+    once, objects, _ = fdtdx.apply_params(arrays, objects, params, key)
+    _, out = fdtdx.run_fdtd(once, objects, config, key, show_progress=False)
+    twice, _, _ = fdtdx.apply_params(out, objects, params, key)
+
+    cells = (slice(None), slice(4, 8), slice(4, 8), slice(4, 8))
+    placed = arrays.electric_conductivity[cells]
+    assert float(placed.min()) > 0.0
+    np.testing.assert_allclose(once.electric_conductivity[cells], 0.75 * placed, rtol=1e-6)
+    np.testing.assert_array_equal(twice.electric_conductivity, once.electric_conductivity)
+    np.testing.assert_array_equal(twice.inv_permittivities, once.inv_permittivities)

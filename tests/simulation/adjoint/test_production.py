@@ -85,6 +85,7 @@ def _scene(
     monitor_cell=_MON,
     grid=None,
     device_material=None,
+    lead_wavelengths=None,
 ):
     """24^3 test scene.
 
@@ -99,7 +100,8 @@ def _scene(
     stock defaults. ``extra_blocks`` are static ``(name, lower, shape, material)``
     blocks placed before the Devices, so a Device placed over one covers it.
     ``grid`` replaces the 50 nm cubes; objects are then placed by physical margins.
-    ``device_material`` replaces the Devices' ``si`` (eps 2.25) material.
+    ``device_material`` replaces the Devices' ``si`` (eps 2.25) material. ``lead_wavelengths``
+    adds a one-cell monitor ``"lead"`` at those wavelengths, listed before ``"mon"``.
     """
     if devices is None and with_device:
         devices = [("design", (_DES_LO,) * 3, (_DES_SPAN,) * 3)]
@@ -155,6 +157,9 @@ def _scene(
     place(src, source_cell)
 
     wcs = [fdtdx.WaveCharacter(wavelength=w) for w in _WL]
+    if lead_wavelengths is not None:
+        lead_wcs = [fdtdx.WaveCharacter(wavelength=w) for w in lead_wavelengths]
+        place(fdtdx.PhasorDetector(name="lead", partial_grid_shape=(1, 1, 1), wave_characters=lead_wcs), _MON)
     if monitor_kwargs is None:
         monitor_kwargs = dict(
             components=components,
@@ -974,6 +979,7 @@ class TestLossyDevice:
         """Permittivity and conductivity both follow the design; the conductivity term is needed."""
         lossy = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
         objects, arrays, params, config, _ = _scene(with_device=True, device_material=lossy)
+        params = _varied(params)  # float64: the cosine bound is below float32 resolution
         v_off, g_off = _official_param_grad(objects, arrays, params, config)
         param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
         v_rec, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
@@ -996,6 +1002,11 @@ class TestLossyDevice:
         g_rec = jax.grad(lambda p: _FOM(param_fn(p)))(params)
         rel, _ = _rel_cos(_flat(g_rec), _flat(g_off))
         assert rel < 1e-5, f"absorber sigma={sigma:.0e}: rel_L2 = {rel:.3e}"
+
+    def test_monitor_inside_the_lossy_device(self):
+        """The adjoint current's lossy divisor reads the conductivity apply_params writes; the placed
+        one (air there) was a pure scale 1.10, silently."""
+        _assert_device_parity(device_material=_LOSSY_SI, monitor_cell=(_N // 2,) * 3)
 
 
 class TestAutoDesignRegion:
@@ -1375,6 +1386,13 @@ class TestPmlShare:
         assert not pml_warnings, [str(w.message) for w in pml_warnings]
         assert rel < 1e-5, f"rel {rel:.3e}"
 
+    @pytest.mark.integration
+    def test_a_share_under_the_tolerance_is_quiet(self):
+        same, rel, pml_warnings = self._run(pml=7)
+        assert same
+        assert not pml_warnings, [str(w.message) for w in pml_warnings]
+        assert rel < 1e-3, f"rel {rel:.3e}"
+
 
 def _box_far_field_scene(sim_fs=150.0, pml=_PML, device_material=None):
     """The colour splitter's layout: plane wave down onto a Device on a substrate, box far field around it.
@@ -1532,7 +1550,8 @@ class TestAnisotropicAndMagneticMaterials:
     cosine 1.0 in the first three; the adjoint current's injection factor read from row 0,
     rel 2.0e-01 (scale 1.17) at the stock monitor and 9.4e-01 (scale 1.92) at the raw one; the
     lossy divisor read from row 0, rel 2.1e-01 (scale 0.80); the H current ignoring
-    ``inv_mu``, a pure scale 2.0 at cosine 1.0.
+    ``inv_mu``, a pure scale 2.0 at cosine 1.0; a lossy Device's conductivity gradient summed
+    to one row in a three-row scene, rel 2.4 (scale 3.4).
     """
 
     @pytest.mark.parametrize(
@@ -1554,8 +1573,25 @@ class TestAnisotropicAndMagneticMaterials:
                 extra_blocks=[("mu", *_AROUND_MON, fdtdx.Material(permittivity=1.5, permeability=2.0))],
                 components=("Hx",),
             ),
+            dict(
+                extra_blocks=[
+                    (
+                        "aniso",
+                        *_AROUND_MON,
+                        fdtdx.Material(permittivity=(2.0, 3.0, 4.0), electric_conductivity=(1e5, 2e5, 3e5)),
+                    )
+                ],
+                components=("Ex", "Ey", "Ez"),
+                device_material=fdtdx.Material(permittivity=2.25, electric_conductivity=1e5),
+            ),
         ],
-        ids=["eps_under_the_device", "eps_at_a_stock_monitor", "sigma_at_a_raw_monitor", "mu_at_an_hx_monitor"],
+        ids=[
+            "eps_under_the_device",
+            "eps_at_a_stock_monitor",
+            "sigma_at_a_raw_monitor",
+            "mu_at_an_hx_monitor",
+            "lossy_device_in_a_three_row_sigma_scene",
+        ],
     )
     def test_matches_official(self, scene_kwargs):
         _assert_device_parity(**scene_kwargs)
@@ -1725,8 +1761,10 @@ class TestRunFdtdReciprocity:
         assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
 
     def test_unread_monitors_get_no_adjoint_current_and_jit_sets_up_once(self, monkeypatch):
-        """``mon2`` and ``des`` are recorded but not read: their cotangents are symbolic zeros, so the
-        adjoint solve drives ``mon`` alone. Under ``jax.jit`` the setup runs at trace time, once."""
+        """``lead``, ``mon2`` and ``des`` are recorded but not read: their cotangents are symbolic zeros,
+        so the adjoint solve drives ``mon`` alone. Under ``jax.jit`` the setup runs at trace time, once.
+        ``lead`` records another frequency and is listed first: design phasors recorded at its
+        frequency only were rel 2.0 (cosine -0.71), the objective's row taken by position rel 0.67."""
         import fdtdx.adjoint.dropin as dropin
 
         built = []
@@ -1737,7 +1775,7 @@ class TestRunFdtdReciprocity:
                 super().__init__(*args, names=names, **kwargs)
 
         monkeypatch.setattr(dropin, "AdjointSolve", Spy)
-        objects, arrays, params, config, _ = _scene(with_device=True, mon2_scaling="pulse")
+        objects, arrays, params, config, _ = _scene(with_device=True, mon2_scaling="pulse", lead_wavelengths=(650e-9,))
         loss = _user_loss(arrays, objects, config, "reciprocity", _mon_fom)
         grad = jax.jit(jax.grad(lambda p: loss(p)[0]))
         g_rc = grad(params)

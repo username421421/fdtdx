@@ -311,6 +311,8 @@ class RectilinearGrid(TreeClass):
     z_edges: jax.Array = field()
     _min_spacings: tuple[float, float, float] = frozen_private_field()
     _is_uniform: bool = frozen_private_field()
+    #: Per axis: one cell width along it (a ``QuasiUniformGrid``), at the tolerance of ``_is_uniform``.
+    _uniform_axes: tuple[bool, bool, bool] = frozen_private_field()
     _uniform_spacing: float | None = frozen_private_field()
     _cell_widths: tuple[jax.Array, jax.Array, jax.Array] = private_field(repr=False)
 
@@ -339,14 +341,17 @@ class RectilinearGrid(TreeClass):
         # size, so genuine (>~0.01%) non-uniformity is detected at any scale while a truly uniform
         # grid stays uniform regardless of cell count.
         is_uniform = True
+        uniform_axes = []
         for edges_np, widths in zip(edge_arrays_np, width_arrays):
             eps = float(np.finfo(edges_np.dtype).eps) if np.issubdtype(edges_np.dtype, np.floating) else 0.0
             roundoff = 8.0 * eps * float(np.max(np.abs(edges_np)))
             if float(np.max(np.abs(widths - spacing))) > 1e-4 * abs(spacing) + roundoff:
                 is_uniform = False
-                break
+            axis_spacing = float(widths[0])
+            uniform_axes.append(float(np.max(np.abs(widths - axis_spacing))) <= 1e-4 * abs(axis_spacing) + roundoff)
         object.__setattr__(self, "_min_spacings", min_spacings)
         object.__setattr__(self, "_is_uniform", is_uniform)
+        object.__setattr__(self, "_uniform_axes", tuple(uniform_axes))
         object.__setattr__(self, "_uniform_spacing", float(np.round(spacing, decimals=14)) if is_uniform else None)
 
     @classmethod

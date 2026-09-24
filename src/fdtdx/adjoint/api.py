@@ -53,7 +53,8 @@ def reciprocity_phasor_fn(
         ``phasor_fn(inv_permittivities, electric_conductivity=None)``: the monitor's phasor
         array, or a tuple over several monitors; a monitor storing several arrays (a box) gives
         its whole state dict, to feed its own readout (``project``, ``compute_net_flux``).
-        ``electric_conductivity`` (``None``: the scene's, held constant) is differentiated too.
+        ``electric_conductivity`` (``None``: the scene's, held constant; refused when
+        ``apply_params`` writes another one into a Device) is differentiated too.
         ``phasor_fn.diagnostics`` holds the solve's ``cond`` and the latest convergence estimates.
 
     Raises:

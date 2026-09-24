@@ -64,17 +64,19 @@ power. `Device` parameters with `param_transforms`, several Devices, and a
 design region that defaults to every Device or is named (a Device, any
 detector's cells, a static block). Isotropic and diagonally anisotropic
 permittivity, permeability and conductivity, lossy monitor and design cells
-included; static dispersive blocks, also under a Device; PML, periodic and
-PEC/PMC symmetry boundaries; `UniformGrid` and `QuasiUniformGrid` (one cell
-width per axis); float32 and float64; CPU and GPU.
+included, lossy and etched Devices too; static dispersive blocks, also under a
+Device; PML, periodic and PEC/PMC symmetry boundaries; `UniformGrid`,
+`QuasiUniformGrid` and any grid with one cell width per axis; float32 and
+float64; CPU and GPU.
 
 **Refused at setup,** by `src/fdtdx/adjoint/validation.py`. Each was measured
 silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
 
 * Objective detectors that are not phasor detectors, or that have an
-  apodization, a switch skipping time steps, `reduce_volume=True`, a
-  `dft_subsample` stride below 4 samples per period, or (box projections) fewer
-  than six components. Objective monitors with different frequencies.
+  apodization, a switch skipping time steps, `reduce_volume=True`,
+  `inverse=True`, a `dft_subsample` stride below 4 samples per period, or (box
+  projections) fewer than six components. Objective monitors with different
+  frequencies.
 * Grids whose cell width varies along an axis (a stretched `RectilinearGrid`),
   nonzero Bloch vectors, full 3x3 material tensors.
 * A design region overlapping a PML, or containing a stock source (an
@@ -84,10 +86,15 @@ silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
   `reciprocity_phasor_fn`).
 * An amplitude solve with condition number above 1e4: the run is too short to
   separate the objective frequencies.
+* `phasor_fn(inv_eps)` alone where `apply_params` writes a Device's
+  conductivity: pass both arrays it returns.
 
 **Not available:** design-dependent magnetic loss or permeability;
 `apply_params` writes neither for a Device, in any method. (Lossy Device
 materials, i.e. electric conductivity, are supported since `ebdfc00`.)
+`GradientConfig("reversible")` does not differentiate the conductivity, so a
+gradient through a lossy or etched Device raises there; a lossless Device in a
+lossy scene is unaffected (`notes/adjoint/05-guards.md`).
 
 **Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
 about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is
@@ -104,7 +111,7 @@ Files:
 * `src/fdtdx/adjoint/design.py` — design regions, the internal design detector,
   `internal_scene`, `apply_objects_once`, `device_dispersion_as_applied`
 * `src/fdtdx/adjoint/kernel.py` — window, amplitude solve, gradient kernel,
-  `dft_tail`, `ConvergenceWarning`
+  `dft_tail`, `ConvergenceWarning`, `PmlWarning`
 * `src/fdtdx/adjoint/validation.py` — every refusal
 * `src/fdtdx/objects/sources/adjoint.py` — `AdjointCurrentSource`
 * `tests/unit/adjoint/` (all in CI) and `tests/simulation/adjoint/` (parity
@@ -151,8 +158,10 @@ Scope decisions already made, do not re-litigate without asking:
    adjoint-source rules.
 3. **Integration:** opt-in. The standalone wrappers came first; the drop-in
    `GradientConfig(method="reciprocity")` (asked for on 2026-09-23) adds one
-   `run_fdtd` branch and one `Literal` value and leaves the `reversible` and
-   `checkpointed` paths untouched, so they cannot regress.
+   `run_fdtd` branch and one `Literal` value and leaves the `checkpointed` path
+   untouched. `reversible` is unchanged except where `ebdfc00` made a Device's
+   conductivity depend on its parameters, which it cannot differentiate: that
+   gradient raises instead of an `UnexpectedTracerError`.
 
 ## Notes
 

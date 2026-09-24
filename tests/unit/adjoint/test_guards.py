@@ -22,6 +22,7 @@ from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.core.grid import QuasiUniformGrid, RectilinearGrid, UniformGrid
 from fdtdx.fdtd.initialization import apply_params
 from fdtdx.fdtd.update import update_E, update_H
+from fdtdx.interfaces.recorder import Recorder
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 
@@ -50,13 +51,21 @@ def _scene(
     grid=None,
     pml=0,
     extra=(),
+    device_material=None,
+    gradient_config=None,
     return_params=False,
 ):
     """12^3 scene, no source, and no boundaries unless ``pml`` cells of PML. ``regions`` are
     extra stock detectors ``(name, lower, shape[, wave_characters])``; ``blocks`` are
     ``(name, lower, shape, material)``; ``extra`` are ``(object, lower)``. ``grid`` defaults
-    to 50 nm cubes."""
-    config = SimulationConfig(time=time, grid=grid or UniformGrid(spacing=50e-9), backend="cpu", dtype=jnp.float64)
+    to 50 nm cubes; ``device_material`` replaces the Devices' ``si`` (eps 2.25)."""
+    config = SimulationConfig(
+        time=time,
+        grid=grid or UniformGrid(spacing=50e-9),
+        backend="cpu",
+        dtype=jnp.float64,
+        gradient_config=gradient_config,
+    )
     objs, cons = [], []
     vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
     objs.append(vol)
@@ -81,7 +90,10 @@ def _scene(
             name=name,
             partial_grid_shape=shape,
             partial_voxel_grid_shape=(1, 1, 1),
-            materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+            materials={
+                "air": fdtdx.Material(permittivity=1.0),
+                "si": device_material or fdtdx.Material(permittivity=2.25),
+            },
             param_transforms=[],
         )
         at(dev, lo)
@@ -109,6 +121,7 @@ def _scene(
 
 
 _LOSSY = fdtdx.Material(permittivity=2.25, permeability=2.0, electric_conductivity=1e5, magnetic_conductivity=6e9)
+_LOSSY_SI = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
 
 
 class TestLossyInjection:
@@ -200,6 +213,22 @@ class TestLossyInjection:
         phasor_fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
         with pytest.raises(ValueError, match="the scene stores none"):
             phasor_fn(arrays.inv_permittivities, jnp.zeros_like(arrays.inv_permittivities))
+
+    def test_a_design_writing_the_conductivity_must_pass_it(self):
+        """``phasor_fn(inv_eps)`` alone kept the placed conductivity, which ``apply_params`` no longer
+        leaves in a lossy Device: FoM off by a factor of 24, silently."""
+        objects, arrays, config = _scene(device_material=_LOSSY_SI)
+        phasor_fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        with pytest.raises(ValueError, match=r"writes the conductivity of Device\(s\) \['design'\]"):
+            phasor_fn(arrays.inv_permittivities)
+
+    @pytest.mark.parametrize("lower, listed", [((4, 4, 4), True), ((0, 0, 0), False)], ids=["under", "elsewhere"])
+    def test_loss_placed_under_a_device_is_replaced(self, lower, listed):
+        """``apply_params`` makes a lossless Device lossless over a lossy block; loss elsewhere stays."""
+        from fdtdx.adjoint.validation import conductive_devices
+
+        objects, arrays, _ = _scene(blocks=(("loss", lower, (4, 4, 4), _LOSSY_SI),))
+        assert conductive_devices(objects, arrays) == (["design"] if listed else [])
 
 
 class TestDispersionUnderDevice:
@@ -354,6 +383,13 @@ class TestTopLevelExports:
 # --------------------------------------------------------------------------- 5. grid, PML, frequencies
 
 
+def _stretched_x():
+    """x widths varying by +-20%, y and z at 50 nm."""
+    widths = 50e-9 * (1.0 + 0.2 * np.sin(2 * np.pi * np.arange(_N) / 9.0))
+    u = 50e-9 * np.arange(_N + 1.0)
+    return RectilinearGrid(x_edges=np.concatenate([[0.0], np.cumsum(widths)]), y_edges=u, z_edges=u)
+
+
 class TestSceneRefusals:
     """Measured before the refusals (test_production's 24^3 scene, parameter level), nothing
     raised: x widths varying by +-20% rel 1.5e-01 at cosine 0.992, scale 0.91 (+-5%: 3.8e-02;
@@ -361,10 +397,7 @@ class TestSceneRefusals:
     at scale 0.93, all of it on the PML cells (2.2e-07 on the rest; touching it: 3.0e-07)."""
 
     def test_varying_cell_widths_are_refused(self):
-        widths = 50e-9 * (1.0 + 0.2 * np.sin(2 * np.pi * np.arange(_N) / 9.0))
-        x = np.concatenate([[0.0], np.cumsum(widths)])
-        u = 50e-9 * np.arange(_N + 1.0)
-        objects, arrays, config = _scene(grid=RectilinearGrid(x_edges=x, y_edges=u, z_edges=u))
+        objects, arrays, config = _scene(grid=_stretched_x())
         with pytest.raises(NotImplementedError, match="cell widths vary along x"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
@@ -412,12 +445,38 @@ class TestSceneRefusals:
         with pytest.raises(ValueError, match="must share frequencies"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"))
 
+    def test_inverse_objective_monitor_is_refused(self):
+        """It records nothing in a forward run: FoM 0 and checkpointed's gradient 0, ours was nonzero."""
+        inv = PhasorDetector(
+            name="inv",
+            partial_grid_shape=(1, 1, 1),
+            wave_characters=[fdtdx.WaveCharacter(wavelength=600e-9)],
+            inverse=True,
+        )
+        objects, arrays, config = _scene(extra=((inv, (9, 6, 6)),))
+        with pytest.raises(NotImplementedError, match="inverse=True"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="inv")
+
 
 # --------------------------------------------------------------------------- 6. run_fdtd, method="reciprocity"
 
 
 def _mon_power(out):
     return -jnp.sum(jnp.abs(out.detector_states["mon"]["phasor"]) ** 2)
+
+
+_LORENTZ = fdtdx.Material(
+    permittivity=2.0,
+    dispersion=fdtdx.DispersionModel(
+        poles=(fdtdx.LorentzPole(resonance_frequency=4e15, damping=2e14, delta_epsilon=0.8),)
+    ),
+)
+
+
+def _dipole():
+    return fdtdx.PointDipoleSource(
+        name="dip", partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=600e-9), polarization=2
+    )
 
 
 class TestRunFdtdReciprocity:
@@ -470,8 +529,54 @@ class TestRunFdtdReciprocity:
         with pytest.raises(NotImplementedError, match=r"arrays\.inv_permeabilities depend"):
             self._trace(_mon_power, perturb)
 
-    def test_scene_refusals_apply(self):
-        with pytest.raises(NotImplementedError, match="reach into a PML"):
-            self._trace(
-                _mon_power, pml=2, devices=(("design", (1, 4, 4), (4, 4, 4)),), monitor=((8, 6, 6), (1, 1, 1), ("Ez",))
-            )
+    @pytest.mark.parametrize(
+        "match, scene_kwargs",
+        [
+            (
+                "reach into a PML",
+                dict(pml=2, devices=(("design", (1, 4, 4), (4, 4, 4)),), monitor=((8, 6, 6), (1, 1, 1), ("Ez",))),
+            ),
+            # also with the GradientConfig set inside the trace, where the grid edges are tracers
+            ("cell widths vary along x", dict(grid=_stretched_x())),
+            ("dispersive", dict(device_material=_LORENTZ)),
+            ("overlap the design region", dict(extra=((_dipole(), (5, 5, 5)),))),
+        ],
+        ids=["device_in_pml", "stretched_grid", "dispersive_device", "source_in_device"],
+    )
+    def test_scene_refusals_apply(self, match, scene_kwargs):
+        """Each silently wrong without its refusal (measured): stretched rel 2.7e-01, Lorentz Device
+        3.0e-01, a dipole in the Device 1.4 at cosine -0.05."""
+        with pytest.raises(NotImplementedError, match=match):
+            self._trace(_mon_power, **scene_kwargs)
+
+    def test_one_width_per_axis_traces(self):
+        """A QuasiUniformGrid resolves to a grid that is not uniform overall; with the GradientConfig
+        set inside the trace its edges are tracers, which used to be refused."""
+        self._trace(_mon_power, grid=QuasiUniformGrid(dx=50e-9, dy=50e-9, dz=40e-9))
+
+
+class TestReversibleConductivity:
+    """``method="reversible"`` does not differentiate the conductivity, which ``apply_params`` writes
+    for a lossy Device. A gradient through one raises here instead of an UnexpectedTracerError; a
+    constant one (a lossless Device, loss elsewhere or under it) and a forward run are unaffected."""
+
+    def _trace(self, grad, **scene_kwargs):
+        cfg = GradientConfig(method="reversible", recorder=Recorder(modules=[]))
+        objects, arrays, config, params = _scene(return_params=True, gradient_config=cfg, **scene_kwargs)
+
+        def loss(p):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, config, _KEY, show_progress=False)[1])
+
+        return jax.make_jaxpr(jax.grad(loss) if grad else loss)(params)
+
+    def test_lossy_device_gradient_is_refused(self):
+        with pytest.raises(NotImplementedError, match="does not differentiate the electric conductivity"):
+            self._trace(True, device_material=_LOSSY_SI)
+
+    def test_lossy_device_forward_runs(self):
+        self._trace(False, device_material=_LOSSY_SI)
+
+    @pytest.mark.parametrize("lower", [(4, 4, 4), (0, 0, 0)], ids=["under", "elsewhere"])
+    def test_lossless_device_in_a_lossy_scene_differentiates(self, lower):
+        self._trace(True, blocks=(("loss", lower, (4, 4, 4), _LOSSY_SI),))

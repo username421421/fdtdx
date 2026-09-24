@@ -348,6 +348,8 @@ def apply_params(
 
     if arrays.initial_inv_permittivities is not None:
         arrays = arrays.at["inv_permittivities"].set(arrays.initial_inv_permittivities)
+    if arrays.electric_conductivity is not None and arrays.initial_electric_conductivity is not None:
+        arrays = arrays.at["electric_conductivity"].set(arrays.initial_electric_conductivity)
 
     # apply parameter to devices
     for device in objects.devices:
@@ -395,19 +397,20 @@ def apply_params(
         # Stored in the same scaled units as in _init_arrays.
         sigma_e = arrays.electric_conductivity
         allowed_sigma = new_sigma_slice = None
+        constant_sigma = False
         if sigma_e is not None:
             num_sigma_components = sigma_e.shape[0]
             conductivity_spacing = constants.c * device._config.time_step_duration / device._config.courant_number
+            sigma_rows = compute_allowed_electric_conductivities(
+                device.materials,
+                isotropic=num_sigma_components == 1,
+                diagonally_anisotropic=num_sigma_components == 3,
+            )
+            # materials sharing one conductivity write a constant, independent of the parameters,
+            # which is what the reversible gradient (it does not differentiate the conductivity) needs
+            constant_sigma = not device.use_etching and len(set(sigma_rows)) == 1
             allowed_sigma = (
-                jnp.asarray(
-                    compute_allowed_electric_conductivities(
-                        device.materials,
-                        isotropic=num_sigma_components == 1,
-                        diagonally_anisotropic=num_sigma_components == 3,
-                    ),
-                    dtype=sigma_e.dtype,
-                )
-                * conductivity_spacing
+                jnp.asarray(sigma_rows, dtype=sigma_e.dtype) * conductivity_spacing
             )  # shape: (num_materials, num_components)
 
         if device.output_type == ParameterType.CONTINUOUS:
@@ -431,6 +434,8 @@ def apply_params(
                 if device.use_etching:
                     sigma_slice = sigma_e[:, *device.grid_slice]
                     new_sigma_slice = sigma_slice + cur_material_indices * (sigma_bc[0] - sigma_slice)
+                elif constant_sigma:
+                    new_sigma_slice = jnp.broadcast_to(sigma_bc[0], (sigma_bc.shape[1], *cur_material_indices.shape))
                 else:
                     new_sigma_slice = sigma_bc[0] + cur_material_indices * (sigma_bc[1] - sigma_bc[0])
 
@@ -1122,6 +1127,9 @@ def _init_arrays(
     # Save backup of initial inv_permittivities when using etched_devices
     using_etching = any(d.use_etching for d in objects.devices)
     initial_inv_permittivities = jnp.copy(inv_permittivities) if using_etching else None
+    initial_electric_conductivity = (
+        jnp.copy(electric_conductivity) if using_etching and electric_conductivity is not None else None
+    )
 
     arrays = ArrayContainer(
         fields=FieldState(
@@ -1142,6 +1150,7 @@ def _init_arrays(
         dispersive_c2=dispersive_c2,
         dispersive_c3=dispersive_c3,
         initial_inv_permittivities=initial_inv_permittivities,
+        initial_electric_conductivity=initial_electric_conductivity,
     )
     return arrays, config, info
 

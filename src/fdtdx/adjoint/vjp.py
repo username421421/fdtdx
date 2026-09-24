@@ -58,7 +58,8 @@ class ReciprocityPhasorFn:
 
     From :func:`~fdtdx.adjoint.reciprocity_phasor_fn`. ``electric_conductivity``, in the units
     ``ArrayContainer`` stores, replaces the scene's and is differentiated too; ``None`` keeps
-    the scene's, as a constant.
+    the scene's, as a constant, and is refused where ``apply_params`` writes another one into
+    a Device (``conductive_devices``).
 
     Attributes:
         diagnostics: ``cond`` of the amplitude solve, and name -> :func:`~fdtdx.adjoint.kernel.dft_tail`
@@ -67,13 +68,26 @@ class ReciprocityPhasorFn:
     """
 
     def __init__(
-        self, fn: Callable[[jax.Array, jax.Array | None], tuple[Any, ...]], *, single: bool, diagnostics: dict[str, Any]
+        self,
+        fn: Callable[[jax.Array, jax.Array | None], tuple[Any, ...]],
+        *,
+        single: bool,
+        diagnostics: dict[str, Any],
+        conductive_devices: Sequence[str] = (),
     ):
         self._fn = fn
         self._single = single
         self.diagnostics = diagnostics
+        self.conductive_devices = tuple(conductive_devices)
 
     def __call__(self, inv_permittivities: jax.Array, electric_conductivity: jax.Array | None = None) -> Any:
+        if electric_conductivity is None and self.conductive_devices:
+            raise ValueError(
+                f"apply_params writes the conductivity of Device(s) {list(self.conductive_devices)} (a lossy material, "
+                "or loss placed under a Device), so the placed one is not the design's. Pass both arrays apply_params "
+                "returned, phasor_fn(arrays.inv_permittivities, arrays.electric_conductivity), or pass the placed "
+                "conductivity explicitly to keep it."
+            )
         out = self._fn(inv_permittivities, electric_conductivity)
         return out[0] if self._single else out
 
@@ -347,4 +361,9 @@ def make_phasor_fn(
         return solve(inv_eps, sigma, F, [c if isinstance(c, dict) else {"phasor": c} for c in ct])
 
     phasor_fn.defvjp(phasor_fwd, phasor_bwd)
-    return ReciprocityPhasorFn(phasor_fn, single=single, diagnostics=diagnostics)
+    return ReciprocityPhasorFn(
+        phasor_fn,
+        single=single,
+        diagnostics=diagnostics,
+        conductive_devices=validation.conductive_devices(objects, arrays),
+    )
