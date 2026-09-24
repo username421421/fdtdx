@@ -1689,6 +1689,16 @@ class TestDispersiveBlockUnderDevice:
         rel, cos, scale = _parity_metrics(g_off, g_rec)
         assert rel < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
 
+    def test_phasor_level_zeroes_them_too(self):
+        """``phasor_fn`` on the arrays apply_params returns is apply_params -> run_fdtd; with the
+        placed coefficients kept it was FoM 0.64x (tiny scene), silently."""
+        block = ("lorentz", (_DES_LO,) * 3, (_DES_SPAN,) * 3, _LORENTZ)
+        objects, arrays, params, config, _ = _scene(with_device=True, extra_blocks=[block])
+        arrs, objs, _ = apply_params(arrays, objects, params, _KEY)
+        _, out = fdtdx.run_fdtd(arrs, objs, config, _KEY, show_progress=False)
+        phasor_fn = reciprocity_phasor_fn(arrays, objs, config, _KEY, objective_detectors="mon")
+        assert _FOM(phasor_fn(arrs.inv_permittivities)) == _FOM(out.detector_states["mon"]["phasor"])
+
 
 _LOSSY_SI = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
 

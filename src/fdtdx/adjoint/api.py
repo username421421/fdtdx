@@ -30,6 +30,10 @@ def reciprocity_phasor_fn(
 ) -> ReciprocityPhasorFn:
     """Differentiable objective phasors as a function of ``inv_permittivities`` (and ``electric_conductivity``).
 
+    Everything else is the placed scene's, except what ``apply_params`` rewrites whatever the
+    design: the Device cells' dispersion coefficients are zeroed
+    (:func:`~fdtdx.adjoint.design.device_dispersion_as_applied`).
+
     Args:
         arrays: placed arrays.
         objects: placed objects in the state ``run_fdtd`` runs them, i.e. applied (a TFSF
@@ -59,7 +63,7 @@ def reciprocity_phasor_fn(
 
     Raises:
         NotImplementedError, ValueError: for a configuration the gradient would get wrong
-            (:mod:`fdtdx.adjoint.validation`).
+            (:mod:`fdtdx.adjoint.validation`), a dispersive Device material among them.
 
     Warns:
         UserWarning: when a named design region leaves Device cells uncovered.
@@ -67,6 +71,8 @@ def reciprocity_phasor_fn(
     names = validation.as_names(objective_detectors)
     detectors = validation.objective_detectors(objects, names)
     validation.check_scene(objects, arrays, config)
+    validation.check_device_materials(objects)
+    arrays = device_dispersion_as_applied(arrays, objects)
     regions = design_regions(objects, design_detector)
     validation.check_outside_pml(objects, regions)
     validation.check_sources_outside(objects, regions)
@@ -153,9 +159,9 @@ def reciprocity_param_fn(
         NotImplementedError: for a dispersive Device material, or an applied object inside a Device.
         ValueError: if ``design_detector`` leaves Device cells uncovered.
     """
-    validation.check_device_materials(objects)
     if design_detector is not None:
         validation.check_coverage(objects, design_regions(objects, design_detector), design_detector, refuse=True)
+    # as apply_params leaves it, for the objects applied once below
     arrays = device_dispersion_as_applied(arrays, objects)
     applied = apply_objects_once(arrays, objects, key)
     phasor_fn = reciprocity_phasor_fn(

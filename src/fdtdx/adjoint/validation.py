@@ -108,8 +108,11 @@ def _check_objective_settings(det: PhasorDetector, name: str) -> None:
 def _stretched_axes(config: SimulationConfig) -> list[str]:
     """The axes whose cell widths vary, at ``RectilinearGrid``'s own uniformity tolerance."""
     grid = config.resolved_grid
-    # static, so also known when a config.aset under jit has traced the edges
-    return [] if grid is None else ["xyz"[axis] for axis, uniform in enumerate(grid._uniform_axes) if not uniform]
+    # both static, so also known when a config.aset under jit has traced the edges; a uniform grid
+    # (the curls then apply no metric) is exact even with width jitter below its tolerance
+    if grid is None or grid._is_uniform:
+        return []
+    return ["xyz"[axis] for axis, uniform in enumerate(grid._uniform_axes) if not uniform]
 
 
 def check_scene(objects: ObjectContainer, arrays: ArrayContainer, config: SimulationConfig) -> None:

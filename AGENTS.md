@@ -81,9 +81,9 @@ silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
   nonzero Bloch vectors, full 3x3 material tensors.
 * A design region overlapping a PML, or containing a stock source (an
   `AdjointCurrentSource` is fine). A mode port or TFSF source overlapping a
-  Device. Dispersive Device materials. A named design region that misses Device
-  cells (refused by `reciprocity_param_fn`, a warning in
-  `reciprocity_phasor_fn`).
+  Device. Dispersive Device materials (both entry points and the drop-in). A
+  named design region that misses Device cells (refused by
+  `reciprocity_param_fn`, a warning in `reciprocity_phasor_fn`).
 * An amplitude solve with condition number above 1e4: the run is too short to
   separate the objective frequencies.
 * `phasor_fn(inv_eps)` alone where `apply_params` writes a Device's
@@ -93,8 +93,8 @@ silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
 `apply_params` writes neither for a Device, in any method. (Lossy Device
 materials, i.e. electric conductivity, are supported since `ebdfc00`.)
 `GradientConfig("reversible")` does not differentiate the conductivity, so a
-gradient through a lossy or etched Device raises there; a lossless Device in a
-lossy scene is unaffected (`notes/adjoint/05-guards.md`).
+gradient through a lossy Device, or one etching loss, raises there; a lossless
+Device in a lossy scene is unaffected (`notes/adjoint/05-guards.md`).
 
 **Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
 about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is

@@ -406,9 +406,12 @@ def apply_params(
                 isotropic=num_sigma_components == 1,
                 diagonally_anisotropic=num_sigma_components == 3,
             )
-            # materials sharing one conductivity write a constant, independent of the parameters,
-            # which is what the reversible gradient (it does not differentiate the conductivity) needs
-            constant_sigma = not device.use_etching and len(set(sigma_rows)) == 1
+            # a conductivity independent of the parameters is written as a constant (or, etched with no
+            # backup, left as placed), which the reversible gradient needs: it does not differentiate it
+            if device.use_etching:
+                constant_sigma = arrays.initial_electric_conductivity is None
+            else:
+                constant_sigma = len(set(sigma_rows)) == 1
             allowed_sigma = (
                 jnp.asarray(sigma_rows, dtype=sigma_e.dtype) * conductivity_spacing
             )  # shape: (num_materials, num_components)
@@ -432,8 +435,9 @@ def apply_params(
                 # same linear weights as the permittivity
                 sigma_bc = allowed_sigma[:, :, None, None, None]
                 if device.use_etching:
-                    sigma_slice = sigma_e[:, *device.grid_slice]
-                    new_sigma_slice = sigma_slice + cur_material_indices * (sigma_bc[0] - sigma_slice)
+                    if not constant_sigma:
+                        sigma_slice = sigma_e[:, *device.grid_slice]
+                        new_sigma_slice = sigma_slice + cur_material_indices * (sigma_bc[0] - sigma_slice)
                 elif constant_sigma:
                     new_sigma_slice = jnp.broadcast_to(sigma_bc[0], (sigma_bc.shape[1], *cur_material_indices.shape))
                 else:
@@ -1127,9 +1131,21 @@ def _init_arrays(
     # Save backup of initial inv_permittivities when using etched_devices
     using_etching = any(d.use_etching for d in objects.devices)
     initial_inv_permittivities = jnp.copy(inv_permittivities) if using_etching else None
-    initial_electric_conductivity = (
-        jnp.copy(electric_conductivity) if using_etching and electric_conductivity is not None else None
-    )
+
+    # and of the conductivity, unless every etched Device's background already has its etch
+    # material's: then etching leaves it as placed, independent of the parameters
+    def _etches_loss(device) -> bool:
+        assert electric_conductivity is not None and conductivity_spacing is not None
+        etch = compute_allowed_electric_conductivities(
+            device.materials,
+            isotropic=electric_conductivity.shape[0] == 1,
+            diagonally_anisotropic=electric_conductivity.shape[0] == 3,
+        )[0]
+        etch = (jnp.array(etch, dtype=config.dtype) * conductivity_spacing)[:, None, None, None]
+        return bool(jnp.any(electric_conductivity[:, *device.grid_slice] != etch))
+
+    etched_loss = electric_conductivity is not None and any(d.use_etching and _etches_loss(d) for d in objects.devices)
+    initial_electric_conductivity = jnp.copy(electric_conductivity) if etched_loss else None
 
     arrays = ArrayContainer(
         fields=FieldState(

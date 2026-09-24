@@ -140,8 +140,14 @@ factor `(1 + exp(+i w dt)) / 2` costs rel 8.5e-02 at cosine 0.996 and its conjug
 * **The drop-in runs every scene refusal.** Without each, `GradientConfig("reciprocity")`
   (GPU, float64): x widths +-20% rel 2.7e-01 at cosine 0.992; a Lorentz Device material
   3.0e-01; a dipole in the Device 1.41 at cosine -0.05. The grid check reads the static
-  `RectilinearGrid._uniform_axes`, so it holds when a config set inside `jit` traces the grid
-  edges; it used to need concrete edges and refused a `QuasiUniformGrid` there as "traced".
+  `RectilinearGrid._is_uniform` and `_uniform_axes`, so it holds when a config set inside `jit`
+  traces the grid edges; it used to need concrete edges and refused a `QuasiUniformGrid` there
+  as "traced". A grid uniform overall is accepted whatever its per-axis jitter below the
+  tolerance: the curls then apply no metric, and the gradient is bit-identical to `UniformGrid`'s.
+* **Dispersive Device materials at the phasor level.** `reciprocity_phasor_fn` now refuses
+  them and zeroes the Device cells' ADE coefficients, as `apply_params` does; with both arrays
+  `apply_params` returned it gave FoM 1.08x (Lorentz Device) and 0.64x (Lorentz block under
+  the Device) of `apply_params -> run_fdtd`, silently (12^3, 20 fs).
 
 ## Paths no isotropic scene reaches
 
@@ -214,15 +220,21 @@ objective monitor in the PML is not refused; it raises a `PmlWarning` (see above
 Reading the current array instead etched it again on every application to returned arrays
 (an optimization loop feeding `run_fdtd`'s output back): Device mean 2.49e-03, 1.47e-03,
 9.58e-04 over three applications with the same parameters, FoM -2.31e-03 to -6.32e-03.
+Where every etched Device's placed background already has its etch material's conductivity
+(checked on the concrete placed arrays), no backup is kept and etching leaves it as placed.
+`extend_material_to_pml` extends both backups, or `apply_params` restoring them undid it.
 
 **`GradientConfig("reversible")`** does not differentiate the conductivity; it closes over it.
 Once `apply_params` wrote it, any conductive scene with a Device made it a function of the
-parameters, and reversible raised `UnexpectedTracerError`. A Device whose materials share one
-conductivity now writes it as a constant (the same values), so reversible is as before for a
-lossless Device; a lossy or etched Device raises a `NotImplementedError` when differentiated
-(its forward runs). Upstream and pre-existing: before `ebdfc00`, reversible on a lossless
-Device next to a lossy block diverged in its reverse reconstruction (rel inf with
-`num_checkpoints_reversible=0`), and a lossy Device was lossless in the forward.
+parameters, and reversible raised `UnexpectedTracerError`. A conductivity that does not depend
+on the parameters is now written as a constant (a Device whose materials share one) or left as
+placed (etching a background of the etch material's own), with the same values, so reversible
+is as before there: an etched air Device next to a lossy block matched checkpointed upstream
+(rel 5.7e-07) and still does. A lossy Device, or one etching loss, raises a
+`NotImplementedError` when differentiated (its forward runs). Upstream and pre-existing:
+before `ebdfc00`, reversible on a lossless Device next to a lossy block diverged in its reverse
+reconstruction (rel inf with `num_checkpoints_reversible=0`), and a lossy Device was lossless
+in the forward.
 
 **The gradient is zero outside the Devices** also for `jax.grad` with respect to
 `arrays.inv_permittivities` itself (`GradientConfig("reciprocity")`): checkpointed's norm

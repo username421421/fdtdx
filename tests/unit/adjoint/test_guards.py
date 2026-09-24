@@ -401,6 +401,16 @@ class TestSceneRefusals:
         with pytest.raises(NotImplementedError, match="cell widths vary along x"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
+    def test_jitter_below_the_uniform_tolerance_is_accepted(self):
+        """y widths 50 nm (1 -+ 0.9e-4): uniform overall (the curls apply no metric), exact, though
+        the axis differs from its own first width by more than the tolerance."""
+        u = 50e-9 * np.arange(_N + 1.0)
+        y = np.concatenate([[0.0], np.cumsum(50e-9 * (1.0 + 0.9e-4 * (-1.0) ** np.arange(1, _N + 1)))])
+        grid = RectilinearGrid(x_edges=u, y_edges=y, z_edges=u)
+        assert grid._is_uniform and grid._uniform_axes == (True, False, True)
+        objects, arrays, config = _scene(grid=grid)
+        reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+
     def test_one_width_per_axis_is_accepted(self):
         objects, arrays, config = _scene(grid=QuasiUniformGrid(dx=50e-9, dy=50e-9, dz=40e-9))
         assert config.has_nonuniform_grid
@@ -444,6 +454,12 @@ class TestSceneRefusals:
         objects, arrays, config = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
         with pytest.raises(ValueError, match="must share frequencies"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"))
+
+    def test_dispersive_device_material_is_refused_at_phasor_level_too(self):
+        """apply_params rewrites its ADE coefficients from the design; phasor_fn kept the placed ones (FoM 1.08x)."""
+        objects, arrays, config = _scene(device_material=_LORENTZ)
+        with pytest.raises(NotImplementedError, match="dispersive"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
     def test_inverse_objective_monitor_is_refused(self):
         """It records nothing in a forward run: FoM 0 and checkpointed's gradient 0, ours was nonzero."""
@@ -580,3 +596,23 @@ class TestReversibleConductivity:
     @pytest.mark.parametrize("lower", [(4, 4, 4), (0, 0, 0)], ids=["under", "elsewhere"])
     def test_lossless_device_in_a_lossy_scene_differentiates(self, lower):
         self._trace(True, blocks=(("loss", lower, (4, 4, 4), _LOSSY_SI),))
+
+    @pytest.mark.parametrize(
+        "lower, refused", [((4, 4, 4), True), ((0, 0, 0), False)], ids=["over_loss", "loss_elsewhere"]
+    )
+    def test_etched_device_differentiates_unless_it_etches_loss(self, lower, refused):
+        """Etching air into a lossless background leaves the conductivity as placed (upstream: exact)."""
+        etched = fdtdx.Device(
+            name="design",
+            partial_grid_shape=(4, 4, 4),
+            partial_voxel_grid_shape=(1, 1, 1),
+            materials={"air": fdtdx.Material()},
+            param_transforms=[],
+            use_etching=True,
+        )
+        kwargs = dict(devices=(), extra=((etched, (4, 4, 4)),), blocks=(("loss", lower, (4, 4, 4), _LOSSY_SI),))
+        if refused:
+            with pytest.raises(NotImplementedError, match="does not differentiate the electric conductivity"):
+                self._trace(True, **kwargs)
+        else:
+            self._trace(True, **kwargs)

@@ -152,4 +152,10 @@ def extend_material_to_pml(
                 direction,
             )
 
+        # the etching backups apply_params restores, or it would undo the extension
+        for backup in ("initial_inv_permittivities", "initial_electric_conductivity"):
+            value = getattr(arrays, backup, None)
+            if value is not None:
+                arrays = arrays.aset(backup, value.at[pml_idx].set(value[interior_idx]))
+
     return arrays

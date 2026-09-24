@@ -94,6 +94,16 @@ class TestExtendMaterialToPmlMinus:
         pml_region = np.asarray(result.inv_permittivities[:, 0:2, :, :])
         np.testing.assert_allclose(pml_region, 0.5)
 
+    def test_etching_backups_are_extended_too(self):
+        """apply_params restores them for an etched Device, which would otherwise undo the extension."""
+        objects, arrays = self._make_setup()
+        sigma = jnp.zeros((1, 10, 5, 5)).at[:, 2].set(0.3)
+        arrays = arrays.aset("initial_inv_permittivities", arrays.inv_permittivities)
+        arrays = arrays.aset("electric_conductivity", sigma).aset("initial_electric_conductivity", sigma)
+        result = extend_material_to_pml(objects, arrays)
+        np.testing.assert_allclose(np.asarray(result.initial_inv_permittivities[:, 0:2]), 0.5)
+        np.testing.assert_allclose(np.asarray(result.initial_electric_conductivity[:, 0:2]), 0.3)
+
     def test_interior_not_modified(self):
         """Cells at index ≥ 2 must remain unchanged after the call."""
         objects, arrays = self._make_setup()
