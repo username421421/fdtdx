@@ -8,14 +8,14 @@ FDTDX. Keep these trees apart:
 
 | Tree | What it is | May an agent edit it? |
 | --- | --- | --- |
-| `/home/zhuwei/fdtdx-dev/fdtdx` | this repo's main worktree, branch `reciprocity-adjoint`, pushed to `github.com/username421421/fdtdx` (a fork of `ymahlau/fdtdx`) | **Yes.** |
-| `/home/zhuwei/fdtdx-dev/fdtdx-cs-probe` | worktree, branch `probe/accept-defaults`: **the current adjoint code**, local only, ahead of `reciprocity-adjoint` | Yes, when the task names it. |
-| `/home/zhuwei/fdtdx-dev/fdtdx-lossy` | worktree, branch `probe/lossy-design`: design-dependent loss, in progress | Only for that task. |
+| `/home/zhuwei/fdtdx-dev/fdtdx` | this repo, the only tree, branch `main`, pushed to `github.com/username421421/fdtdx` (a fork of `ymahlau/fdtdx`) | **Yes.** |
 | `/home/zhuwei/miniconda3/envs/fdtdx` | FDTDX 0.6.2 installed non-editable at `f4e610c3`; backs the colour-splitter and NeuroShaper campaigns | **No.** Installing anything here silently changes published results. |
 | `/home/zhuwei/fdtdx/color_splitter_d4` | research project that *uses* the pinned 0.6.2; has its own `AGENTS.md` | Only when the task is about it. |
 
-`git worktree list` shows the current worktrees, and
-`git log reciprocity-adjoint..probe/accept-defaults` what is not yet pushed.
+One branch, `main`, locally and on GitHub: upstream FDTDX at `60c1c271` plus
+the reciprocity commits. `git log 60c1c271..main` lists them, `git status -sb`
+shows what is not yet pushed. Work on `main`; do not create branches or
+worktrees without asking.
 There is also `/home/zhuwei/miniconda3/envs/mp` with Meep 1.34.0, used as a
 cross-solver reference. Never install FDTDX into it.
 
@@ -124,10 +124,9 @@ Files:
 
 ## Environment
 
-Every worktree uses one interpreter, `/home/zhuwei/fdtdx-dev/fdtdx/.venv/bin/python`,
-and its editable install points at the **main** worktree. From another
-worktree, set `PYTHONPATH=<worktree>/src` and print `fdtdx.__file__` to prove
-which tree you are running.
+The interpreter is `/home/zhuwei/fdtdx-dev/fdtdx/.venv/bin/python`; its
+editable install points at this tree's `src`, so no `PYTHONPATH` is needed.
+Print `fdtdx.__file__` to prove which tree you are running.
 
 The venv carries jax 0.10.1 with the CUDA 13 plugin, added with `uv pip` and not
 in `uv.lock`, so a plain `uv sync` removes it; `uv sync --inexact` keeps it.

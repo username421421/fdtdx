@@ -1,6 +1,6 @@
 # Reciprocity and the adjoint source: the physics we are implementing
 
-Working notes for the `reciprocity-adjoint` branch. This is the theory the
+Working notes for the reciprocity gradient (branch `main`). This is the theory the
 implementation has to reproduce, written so the code can be checked against it
 line by line.
 
