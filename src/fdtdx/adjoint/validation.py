@@ -22,7 +22,7 @@ from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.objects.boundaries.bloch import BlochBoundary
 from fdtdx.objects.detectors.detector import Detector
 from fdtdx.objects.detectors.phasor import PhasorDetector
-from fdtdx.objects.object import INVALID_SLICE_TUPLE_3D, SimulationObject
+from fdtdx.objects.object import INVALID_SLICE_TUPLE_3D, SimulationObject, slices_overlap
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
 from fdtdx.objects.sources.tfsf import TFSFPlaneSource
 
@@ -32,11 +32,6 @@ _CHECKPOINTED = "run_fdtd with GradientConfig(method='checkpointed')"
 def as_names(names: str | Sequence[str]) -> tuple[str, ...]:
     """A name or a sequence of names, as a tuple."""
     return (names,) if isinstance(names, str) else tuple(names)
-
-
-def slices_overlap(a, b) -> bool:
-    """Do two grid slice tuples intersect on all three axes (``check_overlap`` asks for any one)?"""
-    return all(lo_a < hi_b and lo_b < hi_a for (lo_a, hi_a), (lo_b, hi_b) in zip(a, b))
 
 
 def objective_detectors(objects: ObjectContainer, names: Sequence[str]) -> list[PhasorDetector]:

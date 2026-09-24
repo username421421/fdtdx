@@ -32,6 +32,11 @@ from fdtdx.typing import (
 _GLOBAL_COUNTER = 0
 
 
+def slices_overlap(a: SliceTuple3D, b: SliceTuple3D) -> bool:
+    """Do two grid slice tuples intersect on all three axes (``check_overlap`` asks for any one)?"""
+    return all(lo_a < hi_b and lo_b < hi_a for (lo_a, hi_a), (lo_b, hi_b) in zip(a, b))
+
+
 @autoinit
 class UniqueName(TreeClass):
     """Generates unique names for simulation objects.

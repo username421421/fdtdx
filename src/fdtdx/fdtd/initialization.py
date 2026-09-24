@@ -36,6 +36,7 @@ from fdtdx.objects.object import (
     SimulationObject,
     SizeConstraint,
     SizeExtensionConstraint,
+    slices_overlap,
 )
 from fdtdx.objects.static_material.static import SimulationVolume, StaticMultiMaterialObject, UniformMaterialObject
 
@@ -1148,8 +1149,7 @@ def _init_arrays(
         over = [
             d
             for d in objects.devices
-            if d is not device
-            and all(a < z and b < y for (a, y), (b, z) in zip(d.grid_slice_tuple, device.grid_slice_tuple))
+            if d is not device and slices_overlap(d.grid_slice_tuple, device.grid_slice_tuple)
         ]
         if any(row != etch for d in over for row in allowed(d)):
             return True

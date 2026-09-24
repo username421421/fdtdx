@@ -6,6 +6,7 @@ from typing import cast
 import numpy as np
 
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
+from fdtdx.objects.object import slices_overlap
 from fdtdx.objects.static_material.static import UniformMaterialObject
 
 
@@ -161,7 +162,7 @@ def extend_material_to_pml(
     # an etched scene keeps no conductivity backup where etching cannot change it (_init_arrays);
     # loss extended under an etched Device can, so it gets one
     etched_in_pml = any(
-        d.use_etching and all(a < z and b < y for (a, y), (b, z) in zip(d.grid_slice_tuple, pml.grid_slice_tuple))
+        d.use_etching and slices_overlap(d.grid_slice_tuple, pml.grid_slice_tuple)
         for d in objects.devices
         for pml in objects.pml_objects
     )

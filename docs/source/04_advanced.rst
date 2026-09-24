@@ -16,9 +16,16 @@ Welcome to the Advanced guides!
 
       Learn how to set up and run two-dimensional simulations within the 3D-Framework
 
+   .. grid-item-card:: Reciprocity gradients
+      :link: reciprocity
+      :link-type: doc
+
+      Gradients of phasor figures of merit from two forward solves, with one string changed
+
 .. toctree::
    :maxdepth: 2
    :hidden:
    :glob:
 
    notebooks/advanced/*
+   reciprocity
