@@ -16,14 +16,18 @@ from fdtdx.typing import BackendOption
 class GradientConfig(TreeClass):
     """Configuration for gradient computation in simulations.
 
-    This class handles settings for automatic differentiation, supporting either
-    invertible differentiation with a recorder or checkpointing-based differentiation.
+    This class handles settings for automatic differentiation, supporting invertible
+    differentiation with a recorder, checkpointing-based differentiation, or a reciprocity
+    (adjoint-method) gradient.
 
     """
 
     #: Method for gradient computation.
-    #: Can be either "reversible" when using the time reversible autodiff, or "checkpointed" for the exact checkpointing algorithm.
-    method: Literal["reversible", "checkpointed"] = frozen_field(default="reversible")
+    #: "reversible" for the time reversible autodiff, "checkpointed" for the exact checkpointing algorithm, or
+    #: "reciprocity" for the adjoint method of :mod:`fdtdx.adjoint.dropin`: a second forward solve driven by adjoint
+    #: currents at the phasor detectors the figure of merit reads, differentiating ``inv_permittivities`` and
+    #: ``electric_conductivity`` (the gradient is exact for Device parameters and zero outside the Devices).
+    method: Literal["reversible", "checkpointed", "reciprocity"] = frozen_field(default="reversible")
 
     #: Optional recorder for invertible differentiation. Needs to be provided for reversible autodiff. Defaults to None
     recorder: Recorder | None = field(default=None)

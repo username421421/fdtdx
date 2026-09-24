@@ -29,6 +29,7 @@ import numpy as np
 
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import eta0
+from fdtdx.core.jax.utils import is_jax_tracer
 from fdtdx.core.physics.curl import interpolate_fields
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.update import pad_fields_with_symmetry_mirror
@@ -343,13 +344,13 @@ class LossyInjection:
         index: the block's cells.
         axes: per stored component, its axis, i.e. the row of a ``(3, ...)`` material array it uses.
         electric: per stored component, ``courant * eta0 / 2`` on E and 0 on H.
-        magnetic: ``b`` per component and cell (0 on E); ``sigma_H`` and ``inv_mu`` are static.
+        magnetic: ``b`` per component and cell (0 on E); ``sigma_H`` and ``inv_mu`` are not differentiated.
     """
 
     index: tuple[slice, ...]
     axes: tuple[int, ...]
     electric: np.ndarray
-    magnetic: np.ndarray
+    magnetic: jax.Array
 
     def divisor(self, inv_eps: jax.Array, sigma_e: jax.Array | None) -> jax.Array:
         """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps`` and ``sigma_E``."""
@@ -374,7 +375,8 @@ def lossy_injection(
     """The lossy-update divisor on ``block``, or ``None`` in a scene without conductivity.
 
     Built whenever the scene has an ``electric_conductivity``, which may be design-dependent
-    (a lossy Device); a lossless block then divides by exactly one.
+    (a lossy Device); a lossless block then divides by exactly one. Material arrays traced by
+    ``run_fdtd`` under ``jit`` give a traced ``magnetic``, concrete ones a float64 one.
     """
     sigma_e = arrays.electric_conductivity
     sigma_h = arrays.magnetic_conductivity
@@ -384,14 +386,16 @@ def lossy_injection(
     shape = tuple(int(hi) - int(lo) for lo, hi in block)
     axes = tuple(COMPONENT_MAP[c][1] for c in components)
     electric = np.asarray([courant * float(eta0) / 2.0 if c.startswith("E") else 0.0 for c in components])
-    magnetic = np.zeros((len(components), *shape))
     inv_mu = arrays.inv_permeabilities
-    for k, comp in enumerate(components):
-        if comp.startswith("H") and sigma_h is not None:
-            sigma = np.asarray(jax.device_get(_component_row(sigma_h, axes[k])[index]), dtype=np.float64)
-            if isinstance(inv_mu, jax.Array) and inv_mu.ndim > 0:
-                mu = np.asarray(jax.device_get(_component_row(inv_mu, axes[k])[index]), dtype=np.float64)
-            else:
-                mu = float(inv_mu)
-            magnetic[k] = courant * sigma * mu / (2.0 * float(eta0))
+
+    def value(x):
+        return x if is_jax_tracer(x) else np.asarray(jax.device_get(x), dtype=np.float64)
+
+    def row(comp: str, axis: int):
+        if not comp.startswith("H") or sigma_h is None:
+            return np.zeros(shape)
+        mu = _component_row(inv_mu, axis)[index] if isinstance(inv_mu, jax.Array) and inv_mu.ndim > 0 else inv_mu
+        return courant * value(_component_row(sigma_h, axis)[index]) * value(mu) / (2.0 * float(eta0))
+
+    magnetic = jnp.stack([row(c, a) for c, a in zip(components, axes)])
     return LossyInjection(index=index, axes=axes, electric=electric, magnetic=magnetic)

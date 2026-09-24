@@ -59,5 +59,9 @@ def run_fdtd(
             show_progress=show_progress,
             progress_callback=progress_callback,
         )
+    elif config.gradient_config.method == "reciprocity":
+        from fdtdx.adjoint.dropin import reciprocity_fdtd  # fdtdx.adjoint imports this package
+
+        return reciprocity_fdtd(arrays, objects, config, key, show_progress, progress_callback)
     else:
         raise Exception(f"Unknown gradient computation method: {config.gradient_config.method}")

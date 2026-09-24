@@ -1,13 +1,15 @@
 """The ``jax.custom_vjp``: a reciprocity gradient from two plain forward solves.
 
 The forward rule runs the scene with the objective monitors and one internal design detector
-per region, and returns the monitors' stored phasors. The backward rule maps the cotangent of
-every stored channel to the target DFT of its adjoint currents (the recording transpose, the
-scale and magnetic factors and the lossy divisor of :mod:`fdtdx.adjoint.objective`), solves
-for their amplitudes, runs one adjoint solve with all of them (currents superpose, so several
-monitors and every face of a box cost one solve), and pairs the adjoint and forward design
-phasors into the ``inv_permittivities`` gradient and, when it is an input, the
-``electric_conductivity`` one (:mod:`fdtdx.adjoint.kernel`).
+per region, and returns the monitors' stored phasors. The backward rule,
+:class:`AdjointSolve`, maps the cotangent of every stored channel to the target DFT of its
+adjoint currents (the recording transpose, the scale and magnetic factors and the lossy
+divisor of :mod:`fdtdx.adjoint.objective`), solves for their amplitudes, runs one adjoint
+solve with all of them (currents superpose, so several monitors and every face of a box cost
+one solve), and pairs the adjoint and forward design phasors into the ``inv_permittivities``
+gradient and, when it is an input, the ``electric_conductivity`` one
+(:mod:`fdtdx.adjoint.kernel`). :func:`make_phasor_fn` wraps it for the entry points,
+:mod:`fdtdx.adjoint.dropin` for ``run_fdtd``.
 """
 
 from __future__ import annotations
@@ -125,6 +127,156 @@ def derive_adjoint_objects(
     return _adjoint_objects(objects, names, detectors, recordings, config, window, key)
 
 
+def with_materials(arrays: ArrayContainer, inv_eps: jax.Array, sigma: jax.Array | None) -> ArrayContainer:
+    """``arrays`` with ``inv_eps`` and, unless ``None``, ``sigma`` as its electric conductivity."""
+    arrays = arrays.aset("inv_permittivities", inv_eps)
+    if sigma is None:
+        return arrays
+    if arrays.electric_conductivity is None:
+        # the objective monitors' lossy correction is built from the scene's conductivity
+        raise ValueError(
+            "electric_conductivity was passed, but the scene stores none. Place the scene with a "
+            "conductive material, or pass None."
+        )
+    return arrays.aset("electric_conductivity", sigma)
+
+
+def design_tails(out: ArrayContainer, names, slices, omegas, dt) -> tuple[jax.Array, ...]:
+    """:func:`~fdtdx.adjoint.kernel.dft_tail` of each design detector in the output of a solve."""
+    return tuple(
+        dft_tail(out.fields.E[:, *sl], out.detector_states[n]["phasor"][0], omegas, dt) for n, sl in zip(names, slices)
+    )
+
+
+class AdjointSolve:
+    """The backward rule for the objective monitors ``names``: one adjoint solve on the placed scene.
+
+    Set up eagerly by :func:`make_phasor_fn`, and by ``run_fdtd`` with
+    ``GradientConfig("reciprocity")`` when its backward rule is traced, on traced arrays and
+    under ``jax.ensure_compile_time_eval``: what is concrete (monitor transposes and their
+    support, the amplitude matrix, the placed adjoint currents and design detectors) is
+    evaluated then, also under ``jit``, never per call.
+
+    Args: as :func:`make_phasor_fn`; ``report`` receives the diagnostics, ``forward_scales``
+        is the ``raw_scale`` of each forward design detector, in :func:`internal_scene` order.
+    """
+
+    def __init__(
+        self,
+        arrays: ArrayContainer,
+        objects: ObjectContainer,
+        config: SimulationConfig,
+        key: jax.Array,
+        *,
+        names: tuple[str, ...],
+        detectors: Sequence[PhasorDetector],
+        design: str | Sequence[str] | None,
+        window: jax.Array,
+        cond_limit: float,
+        report: TailReport,
+        forward_scales: Sequence[float],
+    ):
+        self.names, self.config, self.key, self.report = names, config, key, report
+        self.omegas = tuple(float(w) for w in detectors[0]._angular_frequencies)
+        self.dt = float(config.time_step_duration)
+        self.courant = float(config.courant_number)
+        # precomputed on concrete values, so the solve inside the VJP is a plain jnp.linalg.solve
+        matrix, self.cond = amplitude_matrix(self.omegas, self.dt, window, cond_limit)
+        self.matrix = jnp.asarray(matrix)
+        self.recordings = [channel_recordings(d, objects, config) for d in detectors]
+        adjoint, groups = _adjoint_objects(objects, names, detectors, self.recordings, config, window, key)
+        self.arrays, self.objects, self.design_names = internal_scene(
+            arrays, adjoint, config, key, keep_detectors=(), design=design, wave_characters=detectors[0].wave_characters
+        )
+        self.design_slices = [self.objects[n].grid_slice for n in self.design_names]
+        # the design scale rides on both the forward and the adjoint phasors
+        self.design_scale_sq = [f * raw_scale(self.objects[n]) for f, n in zip(forward_scales, self.design_names)]
+
+        index = {o.name: i for i, o in enumerate(self.objects.object_list) if isinstance(o, AdjointCurrentSource)}
+        self.channels: list[_Channel] = []
+        for d_i, (name, det, recs, group) in enumerate(zip(names, detectors, self.recordings, groups)):
+            comps = canonical_components(det)
+            src_names = iter(group)
+            for rec in recs:
+                factor = target_factor(det, rec.exact, self.omegas, self.dt)
+                self.channels.append(
+                    _Channel(
+                        detector=d_i,
+                        recording=rec,
+                        sources=tuple(index[next(src_names)] for _ in rec.blocks),
+                        # the conductivity of the arrays the adjoint solve injects into
+                        losses=tuple(lossy_injection(self.arrays, self.courant, b, comps) for b in rec.blocks),
+                        pml=tuple(pml_weight(objects, b) for b in rec.blocks),
+                        factor=jnp.asarray(factor).reshape(factor.shape + (1,) * len(det.grid_shape)),
+                        scale=raw_scale(det),
+                        components=comps,
+                        label=name if rec.state_key == "phasor" else f"{name}[{rec.state_key}]",
+                    )
+                )
+        self.labels = tuple(ch.label for ch in self.channels)
+        self.reads_pml = any(m is not None for ch in self.channels for m in ch.pml)
+
+    def objective_tails(self, E: jax.Array, H: jax.Array, states: dict[str, Any]) -> None:
+        """Report the DFT tail of every objective channel of a forward solve; ``states`` are its detector states."""
+        tails = []
+        for ch in self.channels:
+            raw = states[self.names[ch.detector]][ch.recording.state_key][0] / ch.scale
+            left = stored_fields(E, H, ch.components, ch.recording.channel_slice)
+            tails.append(dft_tail(left, raw, self.omegas, self.dt))
+        # host callbacks, so the diagnostics also update under jit
+        jax.debug.callback(partial(self.report, "objective_tail", self.labels), tuple(tails))
+
+    def __call__(
+        self,
+        inv_eps: jax.Array,
+        sigma: jax.Array | None,
+        forward_design: Sequence[jax.Array],
+        cotangents: Sequence[dict[str, jax.Array]],
+    ) -> tuple[jax.Array, jax.Array | None]:
+        """``(d/d inv_eps, d/d sigma)`` from the forward design phasors and, per monitor, ``{state_key: cotangent}``."""
+        live_sigma = self.arrays.electric_conductivity if sigma is None else sigma
+        # the adjoint container is built here, not closed over: a closed-over traced leaf
+        # raises UnexpectedTracerError
+        new_list = list(self.objects.object_list)
+        shares = []
+        for ch in self.channels:
+            ct_one = cotangents[ch.detector][ch.recording.state_key]
+            inside = total = 0.0
+            # cotangent on the recorded values -> on the raw Yee fields the currents drive
+            for idx, target, loss, weight in zip(ch.sources, ch.recording.transpose(ct_one[0]), ch.losses, ch.pml):
+                if loss is not None:
+                    target = target / loss.divisor(inv_eps, live_sigma)[None]
+                power = jnp.abs(target) ** 2
+                total = total + jnp.sum(power)
+                if weight is not None:
+                    inside = inside + jnp.sum(power * weight**2)
+                new_list[idx] = new_list[idx].aset("amplitudes", solve_amplitudes(self.matrix, target * ch.factor))
+            shares.append(jnp.sqrt(inside / jnp.maximum(total, jnp.finfo(power.dtype).tiny)))
+        if self.reads_pml:
+            jax.debug.callback(partial(self.report, "objective_pml_share", self.labels), tuple(shares))
+        _, out_a = checkpointed_fdtd(
+            with_materials(self.arrays, inv_eps, sigma),
+            self.objects.aset("object_list", new_list),
+            self.config,
+            self.key,
+            show_progress=False,
+        )
+        tails = design_tails(out_a, self.design_names, self.design_slices, self.omegas, self.dt)
+        jax.debug.callback(partial(self.report, "adjoint_design_tail", self.design_names), tails)
+        grad = jnp.zeros_like(inv_eps)
+        grad_sigma = None if sigma is None else jnp.zeros_like(sigma)
+        for name, F_i, sl, scale_sq in zip(self.design_names, forward_design, self.design_slices, self.design_scale_sq):
+            lam = out_a.detector_states[name]["phasor"]
+            g_design = assemble_material_gradient(lam, F_i, inv_eps[:, *sl], self.omegas, self.dt, self.courant)
+            # divided by a Python float so a float32 run keeps full precision; set, not
+            # add: overlapping regions compute the same value from the same fields
+            grad = grad.at[:, *sl].set((g_design / scale_sq).astype(inv_eps.dtype))
+            if grad_sigma is not None:
+                g_sigma = assemble_conductivity_gradient(lam, F_i, grad_sigma.shape[0], self.omegas, self.dt)
+                grad_sigma = grad_sigma.at[:, *sl].set((g_sigma / scale_sq).astype(grad_sigma.dtype))
+        return grad, grad_sigma
+
+
 def make_phasor_fn(
     arrays: ArrayContainer,
     objects: ObjectContainer,
@@ -140,52 +292,8 @@ def make_phasor_fn(
     tail_tolerance: float | None,
 ) -> ReciprocityPhasorFn:
     """The differentiable phasor function of a validated scene (see :func:`~fdtdx.adjoint.reciprocity_phasor_fn`)."""
-    omegas = tuple(float(w) for w in detectors[0]._angular_frequencies)
-    dt = float(config.time_step_duration)
-    courant = float(config.courant_number)
-    wave_characters = tuple(detectors[0].wave_characters)
-    # precomputed on concrete values, so the solve inside the VJP is a plain jnp.linalg.solve
-    matrix_np, cond = amplitude_matrix(omegas, dt, window, cond_limit)
-    matrix = jnp.asarray(matrix_np)
-
-    recordings = [channel_recordings(d, objects, config) for d in detectors]
-    adjoint, groups = _adjoint_objects(objects, names, detectors, recordings, config, window, key)
-    fwd_arrays, fwd_objects, des_names = internal_scene(
-        arrays, objects, config, key, keep_detectors=names, design=design, wave_characters=wave_characters
-    )
-    adj_arrays, adj_objects, _ = internal_scene(
-        arrays, adjoint, config, key, keep_detectors=(), design=design, wave_characters=wave_characters
-    )
-    des_slices = [fwd_objects[n].grid_slice for n in des_names]
-    # the design scale rides on both the forward and the adjoint phasors
-    des_scale_sq = [raw_scale(fwd_objects[n]) * raw_scale(adj_objects[n]) for n in des_names]
-
-    index = {o.name: i for i, o in enumerate(adj_objects.object_list) if isinstance(o, AdjointCurrentSource)}
-    channels: list[_Channel] = []
-    for d_i, (name, det, recs, group) in enumerate(zip(names, detectors, recordings, groups)):
-        comps = canonical_components(det)
-        src_names = iter(group)
-        for rec in recs:
-            factor = target_factor(det, rec.exact, omegas, dt)
-            channels.append(
-                _Channel(
-                    detector=d_i,
-                    recording=rec,
-                    sources=tuple(index[next(src_names)] for _ in rec.blocks),
-                    # the conductivity of the arrays the adjoint solve injects into
-                    losses=tuple(lossy_injection(adj_arrays, courant, b, comps) for b in rec.blocks),
-                    pml=tuple(pml_weight(objects, b) for b in rec.blocks),
-                    factor=jnp.asarray(factor).reshape(factor.shape + (1,) * len(det.grid_shape)),
-                    scale=raw_scale(det),
-                    components=comps,
-                    label=name if rec.state_key == "phasor" else f"{name}[{rec.state_key}]",
-                )
-            )
-    # a monitor storing several channels (a box) returns its whole state dict
-    returns_dict = [len(recs) > 1 for recs in recordings]
-
     diagnostics: dict[str, Any] = {
-        "cond": cond,
+        "cond": None,
         "tail_tolerance": tail_tolerance,
         "objective_tail": {},
         "forward_design_tail": {},
@@ -193,37 +301,33 @@ def make_phasor_fn(
         "objective_pml_share": {},
     }
     report = TailReport(diagnostics, tail_tolerance)
-    labels = tuple(ch.label for ch in channels)
-    reads_pml = any(m is not None for ch in channels for m in ch.pml)
-
-    def design_tails(out):
-        return tuple(
-            dft_tail(out.fields.E[:, *sl], out.detector_states[n]["phasor"][0], omegas, dt)
-            for n, sl in zip(des_names, des_slices)
-        )
-
-    def materials(arrs: ArrayContainer, inv_eps: jax.Array, sigma: jax.Array | None) -> ArrayContainer:
-        arrs = arrs.aset("inv_permittivities", inv_eps)
-        if sigma is None:
-            return arrs
-        if arrs.electric_conductivity is None:
-            # the objective monitors' lossy correction is built from the scene's conductivity
-            raise ValueError(
-                "electric_conductivity was passed, but the scene stores none. Place the scene with a "
-                "conductive material, or pass None."
-            )
-        return arrs.aset("electric_conductivity", sigma)
+    fwd_arrays, fwd_objects, des_names = internal_scene(
+        arrays, objects, config, key, keep_detectors=names, design=design, wave_characters=detectors[0].wave_characters
+    )
+    solve = AdjointSolve(
+        arrays,
+        objects,
+        config,
+        key,
+        names=names,
+        detectors=detectors,
+        design=design,
+        window=window,
+        cond_limit=cond_limit,
+        report=report,
+        forward_scales=[raw_scale(fwd_objects[n]) for n in des_names],
+    )
+    diagnostics["cond"] = solve.cond
+    # a monitor storing several channels (a box) returns its whole state dict
+    returns_dict = [len(recs) > 1 for recs in solve.recordings]
 
     def forward(inv_eps: jax.Array, sigma: jax.Array | None):
-        _, out = checkpointed_fdtd(materials(fwd_arrays, inv_eps, sigma), fwd_objects, config, key, show_progress=False)
-        objective_tails = []
-        for ch in channels:
-            raw = out.detector_states[names[ch.detector]][ch.recording.state_key][0] / ch.scale
-            left = stored_fields(out.fields.E, out.fields.H, ch.components, ch.recording.channel_slice)
-            objective_tails.append(dft_tail(left, raw, omegas, dt))
-        # host callbacks, so the diagnostics also update under jit
-        jax.debug.callback(partial(report, "objective_tail", labels), tuple(objective_tails))
-        jax.debug.callback(partial(report, "forward_design_tail", des_names), design_tails(out))
+        _, out = checkpointed_fdtd(
+            with_materials(fwd_arrays, inv_eps, sigma), fwd_objects, config, key, show_progress=False
+        )
+        solve.objective_tails(out.fields.E, out.fields.H, out.detector_states)
+        tails = design_tails(out, des_names, solve.design_slices, solve.omegas, solve.dt)
+        jax.debug.callback(partial(report, "forward_design_tail", des_names), tails)
         outs = tuple(
             dict(out.detector_states[name]) if wants_dict else out.detector_states[name]["phasor"]
             for name, wants_dict in zip(names, returns_dict)
@@ -240,47 +344,7 @@ def make_phasor_fn(
 
     def phasor_bwd(res, ct):
         inv_eps, sigma, F = res
-        live_sigma = adj_arrays.electric_conductivity if sigma is None else sigma
-        # the adjoint container is built here, not closed over: a closed-over traced leaf
-        # raises UnexpectedTracerError
-        new_list = list(adj_objects.object_list)
-        shares = []
-        for ch in channels:
-            ct_det = ct[ch.detector]
-            ct_one = ct_det[ch.recording.state_key] if isinstance(ct_det, dict) else ct_det
-            inside = total = 0.0
-            # cotangent on the recorded values -> on the raw Yee fields the currents drive
-            for idx, target, loss, weight in zip(ch.sources, ch.recording.transpose(ct_one[0]), ch.losses, ch.pml):
-                if loss is not None:
-                    target = target / loss.divisor(inv_eps, live_sigma)[None]
-                power = jnp.abs(target) ** 2
-                total = total + jnp.sum(power)
-                if weight is not None:
-                    inside = inside + jnp.sum(power * weight**2)
-                new_list[idx] = new_list[idx].aset("amplitudes", solve_amplitudes(matrix, target * ch.factor))
-            shares.append(jnp.sqrt(inside / jnp.maximum(total, jnp.finfo(power.dtype).tiny)))
-        if reads_pml:
-            jax.debug.callback(partial(report, "objective_pml_share", labels), tuple(shares))
-        _, out_a = checkpointed_fdtd(
-            materials(adj_arrays, inv_eps, sigma),
-            adj_objects.aset("object_list", new_list),
-            config,
-            key,
-            show_progress=False,
-        )
-        jax.debug.callback(partial(report, "adjoint_design_tail", des_names), design_tails(out_a))
-        grad = jnp.zeros_like(inv_eps)
-        grad_sigma = None if sigma is None else jnp.zeros_like(sigma)
-        for name, F_i, sl, scale_sq in zip(des_names, F, des_slices, des_scale_sq):
-            lam = out_a.detector_states[name]["phasor"]
-            g_design = assemble_material_gradient(lam, F_i, inv_eps[:, *sl], omegas, dt, courant)
-            # divided by a Python float so a float32 run keeps full precision; set, not
-            # add: overlapping regions compute the same value from the same fields
-            grad = grad.at[:, *sl].set((g_design / scale_sq).astype(inv_eps.dtype))
-            if grad_sigma is not None:
-                g_sigma = assemble_conductivity_gradient(lam, F_i, grad_sigma.shape[0], omegas, dt)
-                grad_sigma = grad_sigma.at[:, *sl].set((g_sigma / scale_sq).astype(grad_sigma.dtype))
-        return grad, grad_sigma
+        return solve(inv_eps, sigma, F, [c if isinstance(c, dict) else {"phasor": c} for c in ct])
 
     phasor_fn.defvjp(phasor_fwd, phasor_bwd)
     return ReciprocityPhasorFn(phasor_fn, single=single, diagnostics=diagnostics)

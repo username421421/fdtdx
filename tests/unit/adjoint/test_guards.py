@@ -18,8 +18,9 @@ import pytest
 import fdtdx
 from fdtdx.adjoint import gaussian_window, reciprocity_param_fn, reciprocity_phasor_fn
 from fdtdx.adjoint.kernel import solve_adjoint_amplitudes
-from fdtdx.config import SimulationConfig
+from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.core.grid import QuasiUniformGrid, RectilinearGrid, UniformGrid
+from fdtdx.fdtd.initialization import apply_params
 from fdtdx.fdtd.update import update_E, update_H
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.sources.adjoint import AdjointCurrentSource
@@ -48,11 +49,13 @@ def _scene(
     monitor=((10, 6, 6), (1, 1, 1), ("Ez",)),
     grid=None,
     pml=0,
+    extra=(),
     return_params=False,
 ):
     """12^3 scene, no source, and no boundaries unless ``pml`` cells of PML. ``regions`` are
     extra stock detectors ``(name, lower, shape[, wave_characters])``; ``blocks`` are
-    ``(name, lower, shape, material)``. ``grid`` defaults to 50 nm cubes."""
+    ``(name, lower, shape, material)``; ``extra`` are ``(object, lower)``. ``grid`` defaults
+    to 50 nm cubes."""
     config = SimulationConfig(time=time, grid=grid or UniformGrid(spacing=50e-9), backend="cpu", dtype=jnp.float64)
     objs, cons = [], []
     vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
@@ -94,6 +97,8 @@ def _scene(
     at(mon, mon_lo)
     for name, lo, shape, *own in regions:
         at(PhasorDetector(name=name, partial_grid_shape=shape, wave_characters=own[0] if own else wcs), lo)
+    for obj, lo in extra:
+        at(obj, lo)
     objects, arrays, params, config, _ = fdtdx.place_objects(
         object_list=objs, config=config, constraints=cons, key=_KEY
     )
@@ -406,3 +411,67 @@ class TestSceneRefusals:
         objects, arrays, config = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
         with pytest.raises(ValueError, match="must share frequencies"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"))
+
+
+# --------------------------------------------------------------------------- 6. run_fdtd, method="reciprocity"
+
+
+def _mon_power(out):
+    return -jnp.sum(jnp.abs(out.detector_states["mon"]["phasor"]) ** 2)
+
+
+class TestRunFdtdReciprocity:
+    """``run_fdtd`` with ``GradientConfig(method="reciprocity")`` differentiates phasor detector
+    states with respect to ``inv_permittivities`` and ``electric_conductivity``. A figure of merit
+    reading anything else, or parameters reaching any other input, raises when the gradient is
+    traced (nothing is solved here) instead of getting the silent zero a ``custom_vjp`` would give
+    it. Parity: ``TestRunFdtdReciprocity`` in ``tests/simulation/adjoint/test_production.py``."""
+
+    def _trace(self, fom, perturb=None, **scene_kwargs):
+        objects, arrays, config, params = _scene(return_params=True, **scene_kwargs)
+
+        def loss(p):
+            # set inside the trace, which makes the config's grid edges tracers
+            cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            if perturb is not None:
+                arrs = perturb(arrs, jax.tree_util.tree_leaves(p)[0])
+            return fom(fdtdx.run_fdtd(arrs, objs, cfg, _KEY, show_progress=False)[1])
+
+        return jax.make_jaxpr(jax.grad(loss))(params)
+
+    def test_phasor_objective_traces(self):
+        self._trace(_mon_power)
+
+    @pytest.mark.parametrize("leaf", ["fields.E", "fields.H", "inv_permittivities"])
+    def test_other_outputs_are_refused(self, leaf):
+        def fom(out):
+            value = out
+            for part in leaf.split("."):
+                value = getattr(value, part)
+            return _mon_power(out) + jnp.sum(value**2)
+
+        with pytest.raises(NotImplementedError, match=rf"run_fdtd output\(s\) \.{leaf}\b"):
+            self._trace(fom)
+
+    @pytest.mark.parametrize("detector", [fdtdx.EnergyDetector, fdtdx.FieldDetector])
+    def test_time_domain_detectors_are_refused(self, detector):
+        def fom(out):
+            return sum(jnp.sum(x) for x in jax.tree_util.tree_leaves(out.detector_states["td"]))
+
+        td = detector(name="td", partial_grid_shape=(1, 1, 1), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError, match="does not accumulate complex phasors"):
+            self._trace(fom, extra=((td, (2, 2, 2)),))
+
+    def test_other_differentiated_inputs_are_refused(self):
+        def perturb(arrays, p):
+            return arrays.aset("inv_permeabilities", jnp.ones_like(arrays.inv_permittivities) / (1 + jnp.mean(p)))
+
+        with pytest.raises(NotImplementedError, match=r"arrays\.inv_permeabilities depend"):
+            self._trace(_mon_power, perturb)
+
+    def test_scene_refusals_apply(self):
+        with pytest.raises(NotImplementedError, match="reach into a PML"):
+            self._trace(
+                _mon_power, pml=2, devices=(("design", (1, 4, 4), (4, 4, 4)),), monitor=((8, 6, 6), (1, 1, 1), ("Ez",))
+            )

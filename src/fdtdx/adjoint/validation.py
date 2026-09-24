@@ -16,6 +16,7 @@ import numpy as np
 
 from fdtdx.adjoint.objective import is_box_projection
 from fdtdx.config import SimulationConfig
+from fdtdx.core.jax.utils import is_jax_tracer
 from fdtdx.core.null import Null
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.objects.boundaries.bloch import BlochBoundary
@@ -106,8 +107,15 @@ def _check_objective_settings(det: PhasorDetector, name: str) -> None:
 def _stretched_axes(config: SimulationConfig) -> list[str]:
     """The axes whose cell widths vary, at ``RectilinearGrid``'s own uniformity tolerance."""
     grid = config.resolved_grid
-    if grid is None:  # an unresolved UniformGrid or QuasiUniformGrid: one width per axis
+    # one width per axis: unresolved (UniformGrid, QuasiUniformGrid) or uniform, which is static
+    # even when a config.aset under jit has traced the edges
+    if grid is None or grid._is_uniform:
         return []
+    if is_jax_tracer(grid.x_edges):
+        raise ValueError(
+            "The config's grid edges are traced (config.aset inside jax.jit copies them), so its cell widths cannot "
+            "be checked. Build the SimulationConfig, GradientConfig included, outside the jitted function."
+        )
     out = []
     for axis in range(3):
         edges = np.asarray(grid.edges(axis))

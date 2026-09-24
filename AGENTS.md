@@ -47,6 +47,14 @@ level down, on `inv_permittivities`. `param_fn.diagnostics` and a
 `ConvergenceWarning` report DFTs that have not converged; a `PmlWarning`
 reports an objective whose adjoint current reaches the lossy part of a PML.
 
+An existing `apply_params -> run_fdtd -> FoM -> jax.grad` script changes one
+string: `GradientConfig(method="checkpointed")` -> `GradientConfig(method="reciprocity")`
+(`src/fdtdx/adjoint/dropin.py`). The forward stays `run_fdtd`'s bit for bit, the
+phasor detectors the FoM reads get the adjoint currents, the gradient is exact
+for Device parameters (zero outside the Devices), and a FoM on the fields or a
+time-domain detector raises. It matches `reciprocity_param_fn` to the bit on the
+test bed, the splitter and the colour splitter, at the same cost.
+
 **Supported:** any differentiable figure of merit over `PhasorDetector`
 phasors: E, H or both, components in any declared order, either
 `scaling_mode`, `exact_interpolation` on or off, `dft_subsample`; several
@@ -77,8 +85,9 @@ silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
 * An amplitude solve with condition number above 1e4: the run is too short to
   separate the objective frequencies.
 
-**Not available:** design-dependent loss. `apply_params` writes no Device
-conductivity in either pipeline; `probe/lossy-design` is working on it.
+**Not available:** design-dependent magnetic loss or permeability;
+`apply_params` writes neither for a Device, in any method. (Lossy Device
+materials, i.e. electric conductivity, are supported since `ebdfc00`.)
 
 **Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
 about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is
@@ -87,7 +96,9 @@ not fixed by running longer.
 Files:
 
 * `src/fdtdx/adjoint/api.py` — `reciprocity_param_fn`, `reciprocity_phasor_fn`
-* `src/fdtdx/adjoint/vjp.py` — the `jax.custom_vjp`, `derive_adjoint_objects`
+* `src/fdtdx/adjoint/dropin.py` — `run_fdtd` with `GradientConfig("reciprocity")`
+* `src/fdtdx/adjoint/vjp.py` — the `jax.custom_vjp`, `AdjointSolve` (the backward
+  rule both paths share), `derive_adjoint_objects`
 * `src/fdtdx/adjoint/objective.py` — monitor channels and their transposes,
   adjoint-current placement, the scale, magnetic and lossy factors
 * `src/fdtdx/adjoint/design.py` — design regions, the internal design detector,
@@ -138,9 +149,10 @@ Scope decisions already made, do not re-litigate without asking:
    objective monitors, so JAX differentiates any post-processing above it, and
    mode overlap, near-to-far and flux come along without their own
    adjoint-source rules.
-3. **Integration:** a **standalone opt-in wrapper**, not a new `GradientConfig`
-   method. Nothing in `run_fdtd` or `config.py` changes, so existing gradient
-   paths cannot regress.
+3. **Integration:** opt-in. The standalone wrappers came first; the drop-in
+   `GradientConfig(method="reciprocity")` (asked for on 2026-09-23) adds one
+   `run_fdtd` branch and one `Literal` value and leaves the `reversible` and
+   `checkpointed` paths untouched, so they cannot regress.
 
 ## Notes
 

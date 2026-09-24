@@ -1376,8 +1376,9 @@ class TestPmlShare:
         assert rel < 1e-5, f"rel {rel:.3e}"
 
 
-def _box_far_field_scene(sim_fs=150.0, pml=_PML):
-    """The colour splitter's layout: plane wave down onto a Device on a substrate, box far field around it."""
+def _box_far_field_scene(sim_fs=150.0, pml=_PML, device_material=None):
+    """The colour splitter's layout: plane wave down onto a Device on a substrate, box far field around it.
+    ``device_material`` replaces the Device's ``si`` (eps 2.25) material."""
     wl0 = 600e-9
     config = SimulationConfig(
         time=sim_fs * 1e-15,
@@ -1411,7 +1412,10 @@ def _box_far_field_scene(sim_fs=150.0, pml=_PML):
             name="design",
             partial_grid_shape=(8, 8, 4),
             partial_voxel_grid_shape=(1, 1, 1),
-            materials={"air": fdtdx.Material(permittivity=1.0), "si": fdtdx.Material(permittivity=2.25)},
+            materials={
+                "air": fdtdx.Material(permittivity=1.0),
+                "si": device_material or fdtdx.Material(permittivity=2.25),
+            },
             param_transforms=[],
         ),
         (8, 8, 11),
@@ -1648,3 +1652,97 @@ class TestDispersiveBlockUnderDevice:
         assert v_rec == v_off, f"forward FoM {float(v_rec)!r} vs run_fdtd {float(v_off)!r}"
         rel, cos, scale = _parity_metrics(g_off, g_rec)
         assert rel < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+
+_LOSSY_SI = fdtdx.Material(permittivity=2.25, electric_conductivity=1e5)
+
+
+def _user_loss(arrays, objects, config, method, fom):
+    """An inverse-design script, ``apply_params -> run_fdtd -> fom(objects, detector_states)``, with the
+    state as aux; the gradients compared differ only in ``method``."""
+    config = config.aset("gradient_config", GradientConfig(method=method, num_checkpoints=8))
+
+    def loss(p):
+        arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+        state = fdtdx.run_fdtd(arrs, objs, config, _KEY, show_progress=False)
+        return fom(objs, state[1].detector_states), state
+
+    return loss
+
+
+def _mon_fom(objs, states):
+    return _FOM(states["mon"]["phasor"])
+
+
+def _bit_identical(a, b):
+    leaves = zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b))
+    return jax.tree_util.tree_structure(a) == jax.tree_util.tree_structure(b) and all(
+        np.array_equal(x, y) for x, y in leaves
+    )
+
+
+class TestRunFdtdReciprocity:
+    """``run_fdtd`` with ``GradientConfig(method="reciprocity")``: an existing script with one string
+    changed. Refusals: ``TestRunFdtdReciprocity`` in ``tests/unit/adjoint/test_guards.py``."""
+
+    @staticmethod
+    def _both(arrays, objects, params, config, fom):
+        return [
+            jax.value_and_grad(_user_loss(arrays, objects, config, method, fom), has_aux=True)(params)
+            for method in ("checkpointed", "reciprocity")
+        ]
+
+    @pytest.mark.integration
+    def test_lossy_device_matches_checkpointed(self):
+        """Stock PhasorDetector, lossy Device. The forward (value, fields and every detector state,
+        with and without the gradient) is ``run_fdtd``'s bit for bit; the gradient is checkpointed's
+        and ``reciprocity_param_fn``'s. Measured on the GPU (float64): rel 4.2e-07 at cosine
+        1.0000000000, scale 0.99999982, bit-identical to ``reciprocity_param_fn``."""
+        objects, arrays, params, config, _ = _scene(with_device=True, monitor_kwargs={}, device_material=_LOSSY_SI)
+        ((v_ck, s_ck), g_ck), ((v_rc, s_rc), g_rc) = self._both(arrays, objects, params, config, _mon_fom)
+        assert v_rc == v_ck and _bit_identical(s_rc, s_ck), "the forward under jax.grad must be run_fdtd's"
+        plain = [_user_loss(arrays, objects, config, m, _mon_fom)(params)[1] for m in ("checkpointed", "reciprocity")]
+        assert _bit_identical(*plain), "the forward without a gradient must be run_fdtd's"
+        rel, cos, scale = _parity_metrics(g_ck, g_rc)
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        g_pf = jax.grad(lambda p: _FOM(param_fn(p)))(params)
+        assert _parity_metrics(g_pf, g_rc)[0] < 1e-12, "the same two solves as reciprocity_param_fn"
+
+    def test_lossy_box_far_field_matches_checkpointed(self):
+        """Stock five-face FieldProjectionAngleDetector box over a lossy Device, read through
+        ``project_all``. Measured on the GPU (float64): rel 6.2e-07 at cosine 1.0000000000, scale
+        0.99999983."""
+        objects, arrays, params, config = _box_far_field_scene(device_material=_LOSSY_SI)
+        theta, phi = jnp.asarray([0.0, 0.3, 2.6]), jnp.asarray([0.0, 1.6, 3.1])
+
+        def fom(objs, states):
+            return -jnp.sum(objs["ff"].project_all(states["ff"], theta, phi)["power"])
+
+        ((v_ck, _), g_ck), ((v_rc, _), g_rc) = self._both(arrays, objects, params, config, fom)
+        assert v_rc == v_ck, "the forward value must be run_fdtd's"
+        rel, cos, scale = _parity_metrics(g_ck, g_rc)
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+    def test_unread_monitors_get_no_adjoint_current_and_jit_sets_up_once(self, monkeypatch):
+        """``mon2`` and ``des`` are recorded but not read: their cotangents are symbolic zeros, so the
+        adjoint solve drives ``mon`` alone. Under ``jax.jit`` the setup runs at trace time, once."""
+        import fdtdx.adjoint.dropin as dropin
+
+        built = []
+
+        class Spy(dropin.AdjointSolve):
+            def __init__(self, *args, names, **kwargs):
+                built.append(names)
+                super().__init__(*args, names=names, **kwargs)
+
+        monkeypatch.setattr(dropin, "AdjointSolve", Spy)
+        objects, arrays, params, config, _ = _scene(with_device=True, mon2_scaling="pulse")
+        loss = _user_loss(arrays, objects, config, "reciprocity", _mon_fom)
+        grad = jax.jit(jax.grad(lambda p: loss(p)[0]))
+        g_rc = grad(params)
+        grad(jax.tree_util.tree_map(lambda x: 0.9 * x, params))
+        assert built == [("mon",)]
+        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+        g_pf = jax.grad(lambda p: _FOM(param_fn(p)))(params)
+        assert _parity_metrics(g_pf, g_rc)[0] < 1e-10
