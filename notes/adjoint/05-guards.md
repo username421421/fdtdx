@@ -119,7 +119,12 @@ off-diagonal terms kept a phase error `(w_f - w_g) dt / 2`. Measured, silent: Hx
 at 140/160 nm 2.6e-03, Hy at four wavelengths 3.9e-02, a box far field 1.1e-03. Now the carrier
 sits at the integer step for H too and the factor carries both half steps, `-exp(-i w dt)`:
 594/606 nm and the mode port (150 and 300 fs) 2.3e-08 and 1.5e-08; every E-only gradient is
-bit-identical. With it the looser parity gates (1e-4, 1e-3) of the magnetic, near-to-far, flux
+bit-identical. On the user's problems (GPU, float32): the 90/10 splitter (six wavelengths
+1.31-1.65 um, 800 fs) against its recorded checkpointed gradient, directional derivative, 1.8e-04
+before and 1.3e-06 after (param_fn 8.8e-08); the colour splitter's far field against production
+at 80 fs 1.1e-02 -> 7.9e-03 to 9.4e-03, and against the converged gradient at 160 fs (DC-free)
+9.0e-04 -> 1.9e-04 (06-color-splitter.md); the test-bed mode ports unchanged at their float32
+floor (1e-05). With it the looser parity gates (1e-4, 1e-3) of the magnetic, near-to-far, flux
 and official-pipeline tests measured 3e-08 to 3.3e-06, and went to 1e-5.
 
 ## Refusals

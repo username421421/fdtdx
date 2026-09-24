@@ -19,26 +19,28 @@ is refused (amplitude solve cond 6e15).
 
 ## Agreement with production, and with the truth
 
-Raw MMA variables, rel L2 (cosine >= 0.99993 in every row):
+Raw MMA variables, rel L2, with the magnetic carrier fix of 9525ea9 (before it, in brackets;
+the far field reads H at several wavelengths, which that fix made exact):
 
 | run | reciprocity vs production (same run) |
 | --- | --- |
-| user's pulse, 80 fs, initial | 1.1e-02 |
-| user's pulse, 80 fs, balanced_480 | 1.1e-02 |
+| user's pulse, 80 fs, initial | 9.4e-03 (1.1e-02) |
+| user's pulse, 80 fs, balanced_480 | 7.9e-03 (1.1e-02) |
 
-The 1% is not reciprocity error. Against a converged reference (production checkpointed at
-1280 fs with a DC-free pulse), balanced_480:
+The rest is not reciprocity error. Against a converged reference (production checkpointed at
+1280 fs with a DC-free pulse), balanced_480, float32:
 
 | pulse, T | production vs truth | reciprocity vs truth |
 | --- | --- | --- |
-| user's, 80 fs (production today) | 1.18e-02 | 1.09e-02 |
+| user's, 80 fs (production today) | 1.18e-02 | 8.5e-03 (1.09e-02) |
 | user's, 640 fs | 7.5e-03 | 8.3e-03 |
-| DC-free, 160 fs | 2.4e-04 | 9.0e-04 |
-| DC-free, 320 fs | 2.3e-04 | 2.3e-04 |
+| DC-free, 160 fs | 2.4e-04 | 1.9e-04 (9.0e-04) |
+| DC-free, 320 fs | 2.3e-04 | 1.2e-04 (2.3e-04) |
 
-Float64, DC-free, 320 fs, balanced_480: reciprocity vs production rel **1.9e-05**, cosine
-0.9999999998. Grey initial structure, float64, DC-free: 3.4e-03 at 320 fs, 1.8e-03 at 640 fs,
-with reciprocity moving 1.5e-04 between the two and production 3.1e-03 (it converges slower).
+Float64, DC-free, 320 fs, balanced_480: reciprocity vs production rel **1.9e-05** before and
+after the fix (at 320 fs the wavelengths' windowed spectra hardly overlap). Grey initial
+structure, float64, DC-free: 3.4e-03 at 320 fs, 1.8e-03 at 640 fs, with reciprocity moving
+1.5e-04 between the two and production 3.1e-03 (it converges slower).
 
 **The user's source carries DC.** `GaussianPulseProfile` at centre 1.875 / width 1.25
 (normalized) is a few-cycle pulse with |A(0)|/max|A| = 0.59. The static remainder never decays,
@@ -74,9 +76,9 @@ epoch-1 values (beta 4), balanced preset, user's pulse, 80 fs, float32, GPU (ses
 `cstraj/`). FoM -1.622 -> +1.1147 (checkpointed) and -1.622 -> +1.1140 (reciprocity): gain ratio
 0.9997, the per-step FoM gap at most 3.6e-03 and shrinking to 6.9e-04 by step 15, final designs
 0.9% of the distance travelled apart. Wall time for the 16 evaluations with compile: 154 s
-against 37 s.
+against 37 s. (Measured before the magnetic carrier fix, whose gradients are closer still.)
 
 ## Recommendation
 
-DC-free pulse + 160 fs: reciprocity within 9e-4 of the converged gradient at ~2.3 s per call,
+DC-free pulse + 160 fs: reciprocity within 1.9e-4 of the converged gradient at ~2.3 s per call,
 against 8.4 s for today's production gradient, which is 1.2e-02 from it.
