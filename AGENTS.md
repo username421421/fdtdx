@@ -40,9 +40,11 @@ value, grad = jax.value_and_grad(lambda p: my_fom(param_fn(p, beta=beta)))(param
 
 `objects` may come straight from `place_objects`. Once the fields have decayed
 the gradient equals `jax.grad` of `apply_params -> run_fdtd(GradientConfig(
-"checkpointed"))`: forward value bit-identical, gradient rel L2 about 1e-6 in
-float64, 9.4x faster at 24³ on the CPU and 35.3x at 48³ float32 on the GPU
-(`notes/adjoint/03-production.md`). `reciprocity_phasor_fn` is the same one
+"checkpointed"))`: forward value bit-identical, gradient rel L2 1e-8 to 1e-6
+in float64. A lossy Device under a stock box far field (64x64x72, three
+wavelengths, GPU): rel 2.1e-08 (float64) and 2.0e-06 (float32) at 2.1-2.2x a
+forward run, 9-18x faster than checkpointed with 3-7x less memory
+(`notes/adjoint/05-guards.md`). `reciprocity_phasor_fn` is the same one
 level down, on `inv_permittivities`. `param_fn.diagnostics` and a
 `ConvergenceWarning` report DFTs that have not converged; a `PmlWarning`
 reports an objective whose adjoint current reaches the lossy part of a PML.

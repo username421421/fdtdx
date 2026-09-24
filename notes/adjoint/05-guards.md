@@ -234,6 +234,19 @@ the same scene with a lossless Device 0.353 s (2.59x), so the conductivity kerne
 nothing. float64: 1.46 s (2.39x) against 7.87 s (12.9x), rel 2.1e-06 (1.8e-06 at 300 fs;
 lossless Device 1.4e-06).
 
+With the magnetic carrier fix (7e06ecf; session scratchpad `finalbench/bench.py`): the same
+layout (64x64x72, 150 fs, 1574 steps; Device 32x32x8 air / eps 2.25 + 1e5 S/m on an eps 2.1 +
+1e4 S/m substrate; stock five-face box, 550/600/650 nm), `apply_params -> run_fdtd ->
+project_all` jitted, GradientConfig("reciprocity") against ("checkpointed", 8) and (.., 40),
+RTX 3080 Ti, median of 3 steady calls, FoM bit-identical throughout:
+
+| | reciprocity | checkpointed 8 | checkpointed 40 | rel L2 vs checkpointed |
+| --- | --- | --- | --- | --- |
+| float32 | 0.306 s (2.20x fwd), 82 MiB | 5.60 s, 270 MiB | 3.63 s, 836 MiB | 2.0e-06, cos 0.999999999999 |
+| float64 | 1.243 s (2.12x fwd), 123 MiB | 11.23 s, 389 MiB | 7.27 s, 1634 MiB | 2.1e-08, cos 1.000000000000 |
+
+The float64 gap was 2.1e-06 before the fix (three wavelengths, H read by the box).
+
 The same layout at 32x32x40 put the box's side faces inside the 8-cell PML: rel 1.36e-01 at
 cosine 0.992, lossless or lossy, at 60, 150 and 300 fs alike; with a 3-cell PML 2.4e-06. An
 objective monitor in the PML is not refused; it raises a `PmlWarning` (see above).
