@@ -14,8 +14,8 @@ FDTDX. Keep these trees apart:
 
 `main`, locally and on GitHub: upstream FDTDX (merged up to `d66442e`) plus
 the reciprocity commits. `git log upstream/main..main` lists them, `git status -sb`
-shows what is not yet pushed. Work on `main`. `reciprocity-full-20260926` (local
-only) keeps the earlier, larger version: `reciprocity_param_fn` /
+shows what is not yet pushed. Work on `main`. `reciprocity-full-20260926` (also on
+GitHub) keeps the earlier, larger version: `reciprocity_param_fn` /
 `reciprocity_phasor_fn`, lossy Devices, the `apply_params` provenance guard.
 Do not create branches or worktrees without asking.
 There is also `/home/zhuwei/miniconda3/envs/mp` with Meep 1.34.0, used as a
