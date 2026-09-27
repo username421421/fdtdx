@@ -109,8 +109,6 @@ API
     fdtdx.private_field
     fdtdx.QuasiUniformGrid
     fdtdx.RealCoordinateConstraint
-    fdtdx.reciprocity_param_fn
-    fdtdx.reciprocity_phasor_fn
     fdtdx.Recorder
     fdtdx.RecordingState
     fdtdx.RectilinearGrid

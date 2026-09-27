@@ -1,47 +1,31 @@
-"""Reciprocity gradients: the gradient of any figure of merit on phasor monitors, in two forward solves.
+"""Reciprocity gradients: ``run_fdtd`` with ``GradientConfig(method="reciprocity")``.
 
-Instead of differentiating through the time loop, the backward pass places adjoint currents
-at the objective monitors and runs a second forward solve, as Meep does. The scene needs
-nothing added: no adjoint source and no design-region detector.
+Instead of differentiating through the time loop, the backward pass places adjoint currents at
+the phasor detectors the figure of merit reads and runs one more forward solve, as Meep's
+adjoint does, then pairs the two solves' phasors in every Device. It costs about two forward
+solves and stores no time history::
 
-Example, with ``objects, arrays, params, config`` straight from ``fdtdx.place_objects``, a
-``PhasorDetector`` named ``"mon"`` and one or more ``Device``::
-
-    import jax
-    import jax.numpy as jnp
-    from fdtdx.adjoint import reciprocity_param_fn
-
-    param_fn = reciprocity_param_fn(arrays, objects, config, key, objective_detectors="mon")
+    config = config.aset("gradient_config", fdtdx.GradientConfig(method="reciprocity"))
 
     def loss(params):
-        phasors = param_fn(params)  # (1, num_frequencies, num_components, *cells), as run_fdtd records
-        return -jnp.sum(jnp.abs(phasors) ** 2)
+        arrays_p, objects_p, _ = fdtdx.apply_params(arrays, objects, params, key)
+        _, out = fdtdx.run_fdtd(arrays_p, objects_p, config, key)
+        return -jnp.sum(jnp.abs(out.detector_states["mon"]["phasor"]) ** 2)
 
-    value, grad = jax.value_and_grad(loss)(params)  # grad is a ParameterContainer, like params
+    value, grad = jax.value_and_grad(loss)(params)
 
-The gradient equals ``jax.grad`` of ``apply_params`` then ``run_fdtd`` with
-``GradientConfig("checkpointed")`` once the fields have decayed; when they have not, the gradient
-raises instead (``tail_tolerance``), and ``param_fn.diagnostics`` holds the estimates. Keyword arguments to ``param_fn`` go to
-``apply_params`` (``param_fn(params, beta=beta)``). :func:`reciprocity_phasor_fn` is the same one
-level down, as a function of ``inv_permittivities``. Configurations it would get wrong raise at
-setup (:mod:`fdtdx.adjoint.validation`).
+The gradient equals ``GradientConfig(method="checkpointed")``'s once the fields have decayed;
+when they have not, it raises instead (``GradientConfig.tail_tolerance``). Configurations it
+would get wrong raise when the gradient is traced (:mod:`fdtdx.adjoint.validation`).
 
-Modules: :mod:`~fdtdx.adjoint.api` (entry points), :mod:`~fdtdx.adjoint.vjp` (the custom VJP),
-:mod:`~fdtdx.adjoint.objective` (monitor channels and their transposes),
-:mod:`~fdtdx.adjoint.design` (design regions and the internal scene),
-:mod:`~fdtdx.adjoint.kernel` (window, amplitude solve, gradient kernel, convergence estimate),
-:mod:`~fdtdx.adjoint.validation` (refusals). Theory and measurements: ``notes/adjoint/``.
+Modules: :mod:`~fdtdx.adjoint.reciprocity` (the ``custom_vjp`` behind ``run_fdtd``),
+:mod:`~fdtdx.adjoint.solve` (the adjoint solve), :mod:`~fdtdx.adjoint.objective` (monitor
+channels, their transposes and adjoint currents), :mod:`~fdtdx.adjoint.design` (design
+detectors and the solves' scenes), :mod:`~fdtdx.adjoint.kernel` (amplitude solve, gradient
+kernel, convergence estimate), :mod:`~fdtdx.adjoint.validation` (refusals),
+:mod:`~fdtdx.adjoint.source` (the adjoint current). Theory and measurements: ``notes/adjoint/``.
 """
 
-from fdtdx.adjoint.api import ReciprocityParamFn, reciprocity_param_fn, reciprocity_phasor_fn
-from fdtdx.adjoint.kernel import dft_tail, gaussian_window
-from fdtdx.adjoint.vjp import ReciprocityPhasorFn
+from fdtdx.adjoint.reciprocity import reciprocity_fdtd
 
-__all__ = [
-    "ReciprocityParamFn",
-    "ReciprocityPhasorFn",
-    "dft_tail",
-    "gaussian_window",
-    "reciprocity_param_fn",
-    "reciprocity_phasor_fn",
-]
+__all__ = ["reciprocity_fdtd"]

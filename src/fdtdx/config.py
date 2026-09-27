@@ -16,17 +16,14 @@ from fdtdx.typing import BackendOption
 class GradientConfig(TreeClass):
     """Configuration for gradient computation in simulations.
 
-    This class handles settings for automatic differentiation, supporting invertible
-    differentiation with a recorder, checkpointing-based differentiation, or a reciprocity
-    (adjoint-method) gradient.
+    This class handles settings for automatic differentiation, supporting either
+    invertible differentiation with a recorder or checkpointing-based differentiation.
 
     """
 
     #: Method for gradient computation.
-    #: "reversible" for the time reversible autodiff, "checkpointed" for the exact checkpointing algorithm, or
-    #: "reciprocity" for the adjoint method of :mod:`fdtdx.adjoint.dropin`: a second forward solve driven by adjoint
-    #: currents at the phasor detectors the figure of merit reads, differentiating ``inv_permittivities`` and
-    #: ``electric_conductivity`` (the gradient is exact for Device parameters and zero outside the Devices).
+    #: Can be either "reversible" when using the time reversible autodiff, or "checkpointed" for the exact checkpointing algorithm.
+    #: "reciprocity" (:mod:`fdtdx.adjoint`) differentiates phasor detector states by one more forward solve, inside the Devices.
     method: Literal["reversible", "checkpointed", "reciprocity"] = frozen_field(default="reversible")
 
     #: Optional recorder for invertible differentiation. Needs to be provided for reversible autodiff. Defaults to None
@@ -48,10 +45,8 @@ class GradientConfig(TreeClass):
     #: by the ``"checkpointed"`` method. Must not exceed ``time_steps_total - 1``.
     num_checkpoints_reversible: int = frozen_field(default=0)
 
-    #: ``"reciprocity"`` only: the largest estimated relative gradient error from phasors that have
-    #: not converged (fields still in the domain, or ringing, at the end of the run), above which the
-    #: gradient raises instead of being returned. ``None`` switches that check, and the source-waveform
-    #: checks (a source still on at the end, or carrying DC), off.
+    #: "reciprocity" only: the estimated relative gradient error from phasors not converged by the end of the run,
+    #: above which the gradient raises. ``None`` switches it off, with the refusal of a source still injecting then.
     tail_tolerance: float | None = frozen_field(default=1e-2)
 
     def __post_init__(self):
@@ -62,7 +57,7 @@ class GradientConfig(TreeClass):
         if self.num_checkpoints_reversible < 0:
             raise Exception("num_checkpoints_reversible must be >= 0")
         if self.method == "reciprocity" and self.recorder is not None:
-            # the forward would still fill the reversible recording every step, for nothing (13.7x the memory)
+            # the forward would still fill the reversible recording on every step
             raise Exception("A Recorder is used by method='reversible' only; drop it for method='reciprocity'")
 
 

@@ -5,11 +5,11 @@ Reciprocity gradients
 ``GradientConfig(method="reciprocity")`` computes the gradient of a figure of merit on phasor
 detectors from two plain forward solves: the forward run, and one adjoint run driven by currents
 placed where the figure of merit reads the fields. Nothing is differentiated through the time loop,
-so a gradient costs about three forward solves and the memory of one, whatever the run length.
+so a gradient costs about two forward solves and the memory of one, whatever the run length.
 
-It fails fast. Wherever it cannot return ``GradientConfig(method="checkpointed")``'s gradient, it
-raises an exception that names the reason and points to ``method="checkpointed"``; it never
-returns a partial or approximate gradient silently, and never substitutes another method.
+Where it cannot return ``GradientConfig(method="checkpointed")``'s gradient, it raises an
+exception that names the reason and points to ``method="checkpointed"``. The forward run, and every
+other method, are unchanged.
 
 Using it
 ========
@@ -30,8 +30,11 @@ An existing inverse-design script changes one string:
 The forward values are ``run_fdtd``'s, bit for bit, and the gradient is that of
 ``GradientConfig(method="checkpointed")`` once the fields have decayed. Only the phasor detectors
 the figure of merit reads get adjoint currents; several of them share one adjoint solve.
-:func:`fdtdx.reciprocity_param_fn` is the same gradient as a function of the Device parameters, and
-:func:`fdtdx.reciprocity_phasor_fn` one level down, of ``inv_permittivities``.
+
+The gradient is taken with respect to ``inv_permittivities`` inside the Devices, which is where
+``apply_params`` writes the Device parameters: it is exact for them, and zero outside the Devices.
+A figure of merit whose parameters reach the permittivity outside the Devices (a background
+parameter written into the arrays) gets no gradient there; use ``method="checkpointed"`` for it.
 
 What the figure of merit may read
 =================================
@@ -40,23 +43,14 @@ What the figure of merit may read
   ``exact_interpolation``, ``dft_subsample``), and anything computed from them in JAX:
   ``ModeOverlapDetector`` overlaps, a box-mode ``FieldProjectionAngleDetector`` (near-to-far),
   Poynting flux and closed-box net power. Monitors read together may record different frequencies;
-  one adjoint solve drives the union of them. List each monitor once (a name given twice is refused)
-  and read it as often as you like.
+  one adjoint solve drives the union of them.
 * Materials: isotropic and diagonally anisotropic permittivity, permeability and conductivity,
-  lossy monitor and Device cells, lossy and etched Devices, dispersive static blocks (also under a
-  Device), PML, periodic and PEC/PMC symmetry boundaries, float32 and float64, CPU and GPU.
+  lossy cells at the monitors and in the Devices, etched Devices, dispersive static blocks (also
+  under a Device), PML, periodic and PEC/PMC symmetry boundaries, float32 and float64, CPU and GPU.
+  ``apply_params`` writes a Device's permittivity only, in every method, so a Device keeps the
+  conductivity placed under it.
 * Sources: any stock source outside the Devices, a TFSF box (``TFSFPlaneSourceRegion``) around the
   Devices included, whose waveform has ended before the run does.
-
-The gradient is taken with respect to the Device parameters, through ``apply_params``, in the same
-traced function as ``run_fdtd``. It is computed inside the Devices, which is exact for Device
-parameters; a differentiated material array ``apply_params`` did not write (``jax.grad`` with
-respect to ``arrays.inv_permittivities`` itself, a background parameter, a blur after
-``apply_params``) raises, because its sensitivity outside the Devices would be dropped. The check
-follows the arrays ``apply_params`` returns, so it also refuses some exact uses: ``apply_params``
-under a ``jax.jit`` of its own, or its arrays passed through a ``lax.scan`` or ``lax.cond`` carry or
-an ``astype`` before ``run_fdtd``. Call ``apply_params`` directly in the differentiated function
-(``jax.jit`` around the whole of it is fine).
 
 Refused
 =======
@@ -66,13 +60,10 @@ Each of these was measured to give a silently wrong gradient, so it raises inste
 
 * a figure of merit reading the fields, a time-domain detector (``EnergyDetector``,
   ``FieldDetector``, ``PoyntingFluxDetector``) or any other ``run_fdtd`` output;
-* differentiated inputs other than the ``inv_permittivities`` and ``electric_conductivity``
-  ``apply_params`` writes: ``inv_permeabilities``, the magnetic conductivity, the dispersion
-  coefficients, an object's fields (a source amplitude), or a material array not from
-  ``apply_params``; forward-mode differentiation (``jax.jvp``, ``jacfwd``; under ``jax.jit`` JAX's own
-  ``TypeError``). Second derivatives work forward over reverse (``jax.hessian``,
-  ``jax.jvp(jax.grad(f))``); reverse over reverse (``jax.jacrev(jax.jacrev(f))``) fails in FDTDX's
-  time loop for every method;
+* differentiated inputs other than ``inv_permittivities``: ``inv_permeabilities``, the
+  conductivities, an object's fields (a source amplitude). The dispersion coefficients count as
+  constants: ``apply_params`` writes those of a non-dispersive Device material as a blend whose
+  derivative is zero;
 * objective detectors with an apodization, a switch skipping time steps, ``reduce_volume=True``
   or ``inverse=True``, or whose cells reach a PML beyond its zero-loss first cell (crop full
   cross-section monitors to the interior);
@@ -83,28 +74,31 @@ Each of these was measured to give a silently wrong gradient, so it raises inste
   pulse the run does not outlast);
 * grids whose cell width varies along an axis, nonzero Bloch vectors, full 3x3 material tensors,
   dispersive Device materials;
-* a Device overlapping a PML or containing a stock source (:func:`fdtdx.reciprocity_param_fn`,
-  which applies mode ports once at setup, also refuses a mode port inside a Device);
+* a Device overlapping a PML or containing a stock source;
 * a run too short to separate the objective frequencies (amplitude solve condition above 1e4);
 * a ``Recorder`` in the ``GradientConfig`` (it is used by ``method="reversible"`` only).
+
+Forward-mode differentiation (``jax.jvp``, ``jacfwd``) raises JAX's own error for a
+``custom_vjp``. Second derivatives work forward over reverse (``jax.hessian``,
+``jax.jvp(jax.grad(f))``); reverse over reverse (``jax.jacrev(jax.jacrev(f))``) fails in FDTDX's
+time loop for every method.
 
 Convergence
 ===========
 
 Reciprocity computes the gradient of the converged figure of merit from the run's discrete Fourier
 transforms, so the fields must have left the domain by the end of the run. Every gradient is checked
-on every call, and raises when either of two estimates exceeds ``tail_tolerance``
-(``GradientConfig``, default ``1e-2``; also an argument of the functional entry points, whose
-``diagnostics`` hold the latest gradient's estimates):
+on every call, and raises when either of two estimates exceeds ``GradientConfig.tail_tolerance``
+(default ``1e-2``):
 
 * **the objective phasors' truncation** over the channels and frequencies the figure of merit reads.
   Above the tolerance the figure of merit itself is not the converged one, and neither is any
   method's gradient of it;
 * **the gradient's distance from the converged gradient**: the truncation of the forward and adjoint
-  design-region phasors it pairs, cell by cell, over the frequencies the figure of merit reads, plus
-  the objective's, which shifts the adjoint currents as much. A truncation is estimated from the
-  field left at the end and from the growth of the phasors over the last three eighths of the run,
-  fitted with two decaying modes over the cells and continued (each solve runs in four segments with
+  design phasors it pairs, cell by cell, over the frequencies the figure of merit reads, plus the
+  objective's, which shifts the adjoint currents as much. A truncation is estimated from the field
+  left at the end and from the growth of the phasors over the last three eighths of the run, fitted
+  with two decaying modes over the cells and continued (each solve runs in four segments with
   snapshots there, which costs nothing per time step). Measured against runs long enough to
   converge, the gradient's estimate read 1.2x to 4.3x above its true error: it errs on the side of
   refusing.
@@ -116,9 +110,9 @@ Under ``jax.jit`` the refusal surfaces as a ``JaxRuntimeError`` whose text carri
 * **A run too short**, or a resonance (a cavity, a high-index Device, a grazing diffraction order in
   a periodic cell, a mode between two parallel walls) still ringing at the end. Lengthen the run.
 * **A field still arriving**: a reflection from far away, or a pulse's front, reaching a monitor or a
-  Device in the last three eighths of the run. How large it will get cannot be told from the run, so it is
-  refused, even when it is only the PML's own weak reflection coming back: a 10-30% longer run, or a
-  thicker PML, lets it pass.
+  Device in the last three eighths of the run. How large it will get cannot be told from the run, so
+  it is refused, even when it is only the PML's own weak reflection coming back: a 10-30% longer run,
+  or a thicker PML, lets it pass.
 * **A source carrying DC.** A few-cycle Gaussian pulse has a zero-frequency part; where its current
   ends inside the domain it leaves a static charge whose field never decays, and no run length
   removes it. Make the carrier DC-free: for a ``GaussianPulseProfile``, total carrier phase (the
@@ -132,12 +126,13 @@ faster modes in the late windows, is not seen (0.03 to 0.05 of its tail in synth
 comparably slow standing modes (0.23): the figure of merit is then equally unconverged in every method,
 with no warning from any. The checks bound the phasors' relative truncation, not the figure of merit's:
 one near a target (least squares, an equality penalty) amplifies it by about ``|P| / |P - P0|``, which no
-check inside the gradient sees. Compare the per-channel tails in the diagnostics with that distance.
-``method="checkpointed"`` differentiates the truncated run
-exactly instead, and where a mode rings at another frequency than the objective's, that exact
-gradient converges far more slowly than the figure of merit does: the mode's phase at the end of the
-run depends on the design, and its derivative grows with the run length. Distances from the
-converged gradient, measured against runs long enough to converge:
+check inside the gradient sees.
+
+``method="checkpointed"`` differentiates the truncated run exactly instead, and where a mode rings at
+another frequency than the objective's, that exact gradient converges far more slowly than the figure
+of merit does: the mode's phase at the end of the run depends on the design, and its derivative grows
+with the run length. Distances from the converged gradient, measured against runs long enough to
+converge:
 
 ================================================  ============  ============  ============
 scene, run length                                 reciprocity   its estimate  checkpointed

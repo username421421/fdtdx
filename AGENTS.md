@@ -12,10 +12,12 @@ FDTDX. Keep these trees apart:
 | `/home/zhuwei/miniconda3/envs/fdtdx` | FDTDX 0.6.2 installed non-editable at `f4e610c3`; backs the colour-splitter and NeuroShaper campaigns | **No.** Installing anything here silently changes published results. |
 | `/home/zhuwei/fdtdx/color_splitter_d4` | research project that *uses* the pinned 0.6.2; has its own `AGENTS.md` | Only when the task is about it. |
 
-One branch, `main`, locally and on GitHub: upstream FDTDX at `60c1c271` plus
-the reciprocity commits. `git log 60c1c271..main` lists them, `git status -sb`
-shows what is not yet pushed. Work on `main`; do not create branches or
-worktrees without asking.
+`main`, locally and on GitHub: upstream FDTDX (merged up to `d66442e`) plus
+the reciprocity commits. `git log upstream/main..main` lists them, `git status -sb`
+shows what is not yet pushed. Work on `main`. `reciprocity-full-20260926` (local
+only) keeps the earlier, larger version: `reciprocity_param_fn` /
+`reciprocity_phasor_fn`, lossy Devices, the `apply_params` provenance guard.
+Do not create branches or worktrees without asking.
 There is also `/home/zhuwei/miniconda3/envs/mp` with Meep 1.34.0, used as a
 cross-solver reference. Never install FDTDX into it.
 
@@ -27,38 +29,32 @@ wrong tree.
 ## Status
 
 The reciprocity gradient is **implemented, validated against FDTDX's own
-pipeline, and usable for inverse design**. The scene needs nothing added: no
-adjoint source and no design-region detector.
+pipeline, and usable for inverse design**. An existing
+`apply_params -> run_fdtd -> FoM -> jax.grad` script changes one string:
 
 ```python
-from fdtdx.adjoint import reciprocity_param_fn
-
-param_fn = reciprocity_param_fn(arrays, objects, config, key,
-                                objective_detectors="mon")
-value, grad = jax.value_and_grad(lambda p: my_fom(param_fn(p, beta=beta)))(params)
+config = config.aset("gradient_config", fdtdx.GradientConfig(method="reciprocity"))
 ```
 
-`objects` may come straight from `place_objects`. Once the fields have decayed
-the gradient equals `jax.grad` of `apply_params -> run_fdtd(GradientConfig(
-"checkpointed"))`: forward value bit-identical, gradient rel L2 1e-8 to 1e-6
-in float64. A lossy Device under a stock box far field (64x64x72, three
-wavelengths, GPU): rel 2.1e-08 (float64) and 2.0e-06 (float32) at 2.1-2.2x a
-forward run, 9-18x faster than checkpointed with 3-7x less memory
-(`notes/adjoint/05-guards.md`). `reciprocity_phasor_fn` is the same one
-level down, on `inv_permittivities`. It fails fast: every gradient carries an
-estimate of its DFT truncation error and raises, on every call, above
-`tail_tolerance` (default 1e-2; `param_fn.diagnostics` holds the estimates), and
-every configuration it cannot compute exactly raises at setup. It never falls
-back to another method.
+The forward stays `run_fdtd`'s bit for bit; the phasor detectors the FoM reads
+get the adjoint currents; the gradient is taken with respect to
+`inv_permittivities` inside the Devices, which is where `apply_params` writes the
+Device parameters: exact for them, zero outside. Once the fields have decayed it
+equals `GradientConfig("checkpointed")`'s, gradient rel L2 1e-8 to 1e-6 in
+float64. A Device under a stock box far field (64x64x72, three wavelengths,
+GPU): rel 2.1e-08 (float64) and 2.0e-06 (float32) at 2.1-2.2x a forward run,
+9-18x faster than checkpointed with 3-7x less memory
+(`notes/adjoint/05-guards.md`). It fails fast inside the method: every gradient
+carries an estimate of its DFT truncation error and raises, on every call, above
+`GradientConfig.tail_tolerance` (default 1e-2), and every configuration it cannot
+compute exactly raises when the gradient is traced. It never falls back to
+another method, and it changes nothing outside the method.
 
-An existing `apply_params -> run_fdtd -> FoM -> jax.grad` script changes one
-string: `GradientConfig(method="checkpointed")` -> `GradientConfig(method="reciprocity")`
-(`src/fdtdx/adjoint/dropin.py`). The forward stays `run_fdtd`'s bit for bit, the
-phasor detectors the FoM reads get the adjoint currents, the gradient is exact
-for Device parameters (a differentiated material array apply_params did not write
-raises), and a FoM on the fields or a
-time-domain detector raises. It matches `reciprocity_param_fn` to the bit on the
-test bed, the splitter and the colour splitter, at the same cost.
+**Footprint.** Outside `src/fdtdx/adjoint/`, upstream files change in two places
+only: `config.py` (the `"reciprocity"` value of `GradientConfig.method`,
+`tail_tolerance`, and refusing a `Recorder` with it) and `fdtd/wrapper.py` (the
+`run_fdtd` branch). Keep it that way: no fail-fast check may live in, or change
+the behaviour of, upstream code.
 
 **Supported:** any differentiable figure of merit over `PhasorDetector`
 phasors: E, H or both, components in any declared order, either
@@ -66,41 +62,39 @@ phasors: E, H or both, components in any declared order, either
 monitors in one adjoint solve, also at different frequencies (the solve runs at
 their union); `ModeOverlapDetector`, box-mode
 `FieldProjectionAngleDetector` (near-to-far), Poynting flux and closed-box net
-power. `Device` parameters with `param_transforms`, several Devices, and a
-design region that defaults to every Device or is named (a Device, any
-detector's cells, a static block). Isotropic and diagonally anisotropic
-permittivity, permeability and conductivity, lossy monitor and design cells
-included, lossy and etched Devices too; static dispersive blocks, also under a
-Device; PML, periodic and PEC/PMC symmetry boundaries; `UniformGrid`,
-`QuasiUniformGrid` and any grid with one cell width per axis; float32 and
-float64; CPU and GPU.
+power. `Device` parameters with `param_transforms`, several (also overlapping)
+Devices. Isotropic and diagonally anisotropic permittivity, permeability and
+conductivity, lossy monitor and Device cells (loss placed under a Device:
+`apply_params` writes a Device's permittivity only, in every method), etched
+Devices; static dispersive blocks, also under a Device; PML, periodic and PEC/PMC
+symmetry boundaries; `UniformGrid`, `QuasiUniformGrid` and any grid with one cell
+width per axis; float32 and float64; CPU and GPU; `jax.jit`, `eqx.filter_jit` and
+`jax.checkpoint` around the loss.
 
-**Refused at setup,** by `src/fdtdx/adjoint/validation.py`. Each was measured
-silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
+**Refused** by `src/fdtdx/adjoint/validation.py` and `reciprocity.py`. Each was
+measured silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
 
-* Objective detectors that are not phasor detectors, or that have an
-  apodization, a switch skipping time steps, `reduce_volume=True`,
-  `inverse=True`, cells in a PML beyond its zero-loss first cell, a `dft_subsample`
-  stride that folds source spectrum onto an objective frequency, or (box
-  projections) fewer than six components.
+* A FoM reading the fields, a time-domain detector or any other `run_fdtd`
+  output; a differentiated input other than `inv_permittivities` (the dispersion
+  coefficients count as constants: the blend `apply_params` writes for a
+  non-dispersive Device material has zero derivative).
+* Objective detectors that have an apodization, a switch skipping time steps,
+  `reduce_volume=True`, `inverse=True`, cells in a PML beyond its zero-loss first
+  cell, a `dft_subsample` stride that folds source spectrum onto an objective
+  frequency, or (box projections) fewer than six components.
 * Grids whose cell width varies along an axis (a stretched `RectilinearGrid`),
-  nonzero Bloch vectors, full 3x3 material tensors.
-* A design region overlapping a PML, or containing a stock source (an
-  `AdjointCurrentSource` is fine). A mode port or TFSF source overlapping a
-  Device. Dispersive Device materials (both entry points and the drop-in). A
-  named design region that misses Device cells (refused by
-  `reciprocity_param_fn`, a warning in `reciprocity_phasor_fn`).
+  nonzero Bloch vectors, full 3x3 material tensors, a scene without a Device.
+* A Device overlapping a PML or containing a stock source (an
+  `AdjointCurrentSource` is fine); dispersive Device materials.
 * An amplitude solve with condition number above 1e4: the run is too short to
   separate the objective frequencies.
-* `phasor_fn(inv_eps)` alone where `apply_params` writes a Device's
-  conductivity: pass both arrays it returns.
 
-**Not available:** design-dependent magnetic loss or permeability;
-`apply_params` writes neither for a Device, in any method. (Lossy Device
-materials, i.e. electric conductivity, are supported since `ebdfc00`.)
-`GradientConfig("reversible")` does not differentiate the conductivity, so a
-gradient through a lossy Device, or one etching loss, raises there; a lossless
-Device in a lossy scene is unaffected (`notes/adjoint/05-guards.md`).
+**Not refused, by design:** a figure of merit whose parameters reach the
+permittivity outside the Devices (a background parameter written into the
+arrays) gets no gradient there. Detecting it needs a hook in `apply_params`; the
+earlier version had one (branch `reciprocity-full-20260926`), removed to keep
+upstream code untouched. Forward mode (`jax.jvp`) raises JAX's own `custom_vjp`
+error.
 
 **Sources must end, and should be DC-free.** A source still injecting at the end
 of the run is refused. A few-cycle pulse carries DC whose static remainder never
@@ -108,25 +102,22 @@ decays where its current ends inside the domain (0.8% at 0.4 x f0, 8e-8 with the
 DC-free carrier); the convergence estimate raises on it. Make the carrier DC-free
 (`docs/source/reciprocity.rst`) or keep the bandwidth near 0.1 x f0.
 
-Files:
+Files, all in `src/fdtdx/adjoint/`:
 
-* `src/fdtdx/adjoint/api.py` — `reciprocity_param_fn`, `reciprocity_phasor_fn`
-* `src/fdtdx/adjoint/dropin.py` — `run_fdtd` with `GradientConfig("reciprocity")`
-* `src/fdtdx/adjoint/vjp.py` — the `jax.custom_vjp`, `AdjointSolve` (the backward
-  rule both paths share), `derive_adjoint_objects`
-* `src/fdtdx/adjoint/objective.py` — monitor channels and their transposes,
-  adjoint-current placement, the scale, magnetic and lossy factors
-* `src/fdtdx/adjoint/design.py` — design regions, the internal design detector,
-  `internal_scene`, `apply_objects_once`, `device_dispersion_as_applied`
-* `src/fdtdx/adjoint/kernel.py` — window, amplitude solve, gradient kernel,
-  `dft_tail`, `gradient_error_estimate`, `refuse_unconverged`
-* `src/fdtdx/adjoint/validation.py` — every refusal
-* `src/fdtdx/objects/sources/adjoint.py` — `AdjointCurrentSource`
-* `tests/unit/adjoint/` (all in CI) and `tests/simulation/adjoint/` (parity
-  against checkpointed `run_fdtd`). CI (`-m "unit or integration or docs"`)
-  also runs the parity tests marked `integration`, one cheap test per
-  correction. `tests/conftest.py` forces the CPU, so the suite never runs on the
-  GPU; validate on the GPU with scripts.
+* `reciprocity.py`: `reciprocity_fdtd`, the `custom_vjp` behind `run_fdtd`
+* `solve.py`: `AdjointSolve` (the backward rule), `segmented_solve`
+* `objective.py`: monitor channels and their transposes, adjoint-current
+  placement, the scale, magnetic and lossy factors
+* `design.py`: the internal design detector, `internal_scene`, the late windows
+* `kernel.py`: window, amplitude solve, gradient kernel, `dft_tail`,
+  `gradient_error_estimate`, `refuse_unconverged`
+* `validation.py`: the refusals
+* `source.py`: `AdjointCurrentSource`
+
+Tests: `tests/unit/adjoint/` (all in CI) and `tests/simulation/adjoint/` (parity
+against checkpointed `run_fdtd`). CI (`-m "unit or integration or docs"`) also
+runs the parity tests marked `integration`. `tests/conftest.py` forces the CPU,
+so the suite never runs on the GPU; validate on the GPU with scripts.
 
 ## Environment
 
@@ -163,27 +154,32 @@ Scope decisions already made, do not re-litigate without asking:
    objective monitors, so JAX differentiates any post-processing above it, and
    mode overlap, near-to-far and flux come along without their own
    adjoint-source rules.
-3. **Integration:** opt-in. The standalone wrappers came first; the drop-in
-   `GradientConfig(method="reciprocity")` (asked for on 2026-09-23) adds one
-   `run_fdtd` branch and one `Literal` value and leaves the `checkpointed` path
-   untouched. `reversible` is unchanged except where `ebdfc00` made a Device's
-   conductivity depend on its parameters, which it cannot differentiate: that
-   gradient raises instead of an `UnexpectedTracerError`.
+3. **Integration:** opt-in, a contained method beside `checkpointed` and
+   `reversible` (2026-09-26): one `Literal` value, one config field and one
+   `run_fdtd` branch; everything else in `src/fdtdx/adjoint/`. Upstream behaviour,
+   and every other method, are untouched. The functional entry points, lossy
+   Devices and the `apply_params` provenance probe were removed then, and kept on
+   branch `reciprocity-full-20260926`.
 4. **Fail fast** (asked for on 2026-09-24): where reciprocity cannot return
    checkpointed's gradient it raises, naming the reason and `method="checkpointed"`.
    No warning-only path where the gradient can be wrong, and never a silent
-   fallback to another method. Scope stays parity with native FDTDX.
+   fallback to another method. Refusals live inside the method only (2026-09-26).
+   Scope stays parity with native FDTDX.
 
 ## Notes
 
 `notes/adjoint/`, in order: `01-reciprocity-physics.md` is the theory the
 implementation must reproduce; read it before writing adjoint code.
 `02-implementation.md`, `03-production.md` and `04-near-to-far.md` are the
-implementation history, with corrections to earlier claims. `05-guards.md` maps
-the old module names to the current ones and holds the measurement behind every
-refusal, correction factor and default. `_source-transcript.txt` is the raw AI
-chat the theory was distilled from; it contains errors, so trust the note and
-the code over it.
+implementation history, with corrections to earlier claims. `05-guards.md` holds
+the measurement behind every refusal, correction factor and default. The notes
+were written for the functional API (`reciprocity_param_fn`,
+`reciprocity_phasor_fn`) and also describe lossy Devices and the provenance
+guard, all removed on 2026-09-26; their measurements hold for the method, whose
+gradients are bit-identical to the ones they took. Module names there: `vjp.py`
+is now `solve.py`, `dropin.py` is `reciprocity.py`, `objects/sources/adjoint.py`
+is `adjoint/source.py`. `_source-transcript.txt` is the raw AI chat the theory
+was distilled from; it contains errors, so trust the note and the code over it.
 
 ## Validation, and what not to gate on
 
@@ -280,7 +276,7 @@ FDFD with mode-overlap objectives, and `Metagrating3D` and
   time average and the boundary padding for free.
 - **Derive the adjoint scene, never place it again.** `place_objects` splits its
   key once per object, so a second call with a different object count
-  re-randomizes the Device parameters (`vjp.derive_adjoint_objects`).
+  re-randomizes the Device parameters (`solve._adjoint_objects`).
 - **The design detector is not the user's.** Never go back to validating a
   user-built one: each of its settings was a *silent* error while it was
   user-facing (six components: cosine -0.473; `continuous`: pure scale at cosine
@@ -301,13 +297,10 @@ FDFD with mode-overlap objectives, and `Metagrating3D` and
 - **Scenes must decay** to about 1e-8 of peak field before the gradient is
   trusted at 1e-5. Reciprocity equals AD only up to DFT truncation, and the
   error is the product of two truncated transforms.
-- **Rerun `tests/unit/adjoint` after any JAX upgrade.** `adjoint/dropin.py` tells
-  `jax.jvp`, `jax.grad` and `jax.jit` apart through JAX internals that have no
-  public API: tracer class names (`JVPTracer`, `DynamicJaxprTracer`), the private
-  `_trace` attribute and the `jax_use_direct_linearize` flag. The `apply_params`
-  probe also relies on when JAX traces and memoizes a `custom_jvp` rule. A rename
-  gives a loud error (JAX's own message, or a false refusal), not a wrong
-  gradient; the guard tests name the check that changed.
+- **Rerun `tests/unit/adjoint` after any JAX upgrade.** The rule relies on
+  `custom_vjp` with `symbolic_zeros` (`CustomVJPPrimal.perturbed`,
+  `custom_vjp_primal_tree_values`), and on a grid rebuilt inside a trace having
+  traced edges (`validation.check_grid` then refuses when the gradient runs).
 
 ## A separate bug, in the other repo
 

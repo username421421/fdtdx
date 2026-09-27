@@ -1,13 +1,11 @@
-"""Impressed current with a windowed multi-sinusoid waveform, the adjoint source of reciprocity gradients.
+"""Impressed current with a windowed multi-sinusoid waveform, the adjoint source of the reciprocity gradient.
 
 It injects ``J[k](t_n) = window[n] * Re[sum_f amplitudes[f, k] exp(+i w_f t_n)]``, ``t_n = n dt``
 for E and H alike (H's update at ``n + 1/2`` included), into field component ``components[k]``
-with :class:`PointDipoleSource`'s injection law,
-``E <- E - courant * inv_eps * J`` (dually for H), which keeps the discrete Green's
-function symmetric between this source and a phasor detector. The ``window`` makes the
-excitation a decaying pulse so its DFT converges;
-:func:`fdtdx.adjoint.kernel.solve_adjoint_amplitudes` picks ``amplitudes`` so the windowed
-current has a requested DFT.
+with :class:`~fdtdx.PointDipoleSource`'s injection law ``E <- E - courant * inv_eps * J``
+(dually for H), which keeps the discrete Green's function symmetric between this source and a
+phasor detector. The ``window`` makes the excitation a decaying pulse so its DFT converges;
+:func:`fdtdx.adjoint.kernel.solve_amplitudes` picks ``amplitudes`` for a requested DFT.
 """
 
 import jax

@@ -27,6 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from fdtdx.adjoint.source import COMPONENT_MAP, AdjointCurrentSource
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import eta0
 from fdtdx.core.jax.utils import is_jax_tracer
@@ -38,7 +39,6 @@ from fdtdx.objects.detectors.field_projection import (
     _surface_axis_direction,
     _surface_state_key,
 )
-from fdtdx.objects.sources.adjoint import COMPONENT_MAP, AdjointCurrentSource
 from fdtdx.typing import SliceTuple3D
 
 #: Name prefix of the adjoint currents.
@@ -278,16 +278,13 @@ def adjoint_sources(
     config: SimulationConfig,
     window: jax.Array,
     key: jax.Array,
-    angular_frequencies: Sequence[float] | None = None,
+    angular_frequencies: Sequence[float],
 ) -> list[AdjointCurrentSource]:
     """Zero-amplitude adjoint currents, placed on every block of every channel, in channel then block order.
 
     The backward rule fills in the amplitudes, which are traced leaves. They carry
-    ``angular_frequencies`` (the detector's own by default): every objective frequency, when
-    several monitors recording different ones share the adjoint solve.
+    ``angular_frequencies``, every objective frequency, since all monitors share one adjoint solve.
     """
-    if angular_frequencies is None:
-        angular_frequencies = detector._angular_frequencies
     omegas = tuple(float(w) for w in angular_frequencies)
     components = canonical_components(detector)
     sources = []
@@ -376,7 +373,8 @@ class LossyInjection:
     and only then adds the sources, so a current in a lossy cell enters ``1 + a`` times stronger
     than the reciprocal partner of the field the monitor reads there; the target is divided by it
     per cell and component (``1 + b``, ``b = courant * sigma_H * inv_mu / (2 eta0)``, on H). In a
-    lossy design cell the factor appears on both sides of the pairing and cancels.
+    lossy design cell the factor appears on both sides of the pairing and cancels. The
+    conductivities are the scene's, which the gradient does not differentiate.
 
     Attributes:
         index: the block's cells.
@@ -391,7 +389,7 @@ class LossyInjection:
     magnetic: jax.Array
 
     def divisor(self, inv_eps: jax.Array, sigma_e: jax.Array | None) -> jax.Array:
-        """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps`` and ``sigma_E``."""
+        """``1 + a`` (E) or ``1 + b`` (H), shape ``(nc, *block)``, at the live ``inv_eps``."""
         magnetic = jnp.asarray(self.magnetic, dtype=inv_eps.dtype)
         if sigma_e is None:
             return 1.0 + magnetic
@@ -412,8 +410,7 @@ def lossy_injection(
 ) -> LossyInjection | None:
     """The lossy-update divisor on ``block``, or ``None`` in a scene without conductivity.
 
-    Built whenever the scene has an ``electric_conductivity``, which may be design-dependent
-    (a lossy Device); a lossless block then divides by exactly one. Material arrays traced by
+    A lossless block of a conductive scene divides by exactly one. Material arrays traced by
     ``run_fdtd`` under ``jit`` give a traced ``magnetic``, concrete ones a float64 one.
     """
     sigma_e = arrays.electric_conductivity
