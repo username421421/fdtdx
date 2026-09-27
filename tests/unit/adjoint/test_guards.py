@@ -288,33 +288,227 @@ class TestDftTail:
     dt = 1e-16
     omega = 2 * np.pi / (20 * 1e-16)  # 20 steps per period
 
-    def _signal(self, tau_steps, T=400):
-        n = np.arange(T + 1)
-        e = np.cos(self.omega * n * self.dt) * np.exp(-n / tau_steps)
-        phasor = np.sum(np.exp(1j * self.omega * n[:T] * self.dt) * e[:T])
-        return jnp.asarray(e[T]).reshape(1, 1), jnp.asarray(phasor).reshape(1, 1, 1)
+    def _record(self, modes, T=400, cells=1):
+        """What a detector records of damped carriers ``(amplitude, detune, tau_steps, phase)``: the end
+        field, the full phasors, their growth over the three late windows, and the true relative tail.
+
+        With ``cells > 1`` every mode has its own random complex shape ``psi`` over the cells, the field
+        being ``Re[psi exp(i w' t)]``: its two rotating parts then have shapes ``psi`` and ``conj(psi)``.
+        """
+        rng = np.random.default_rng(0)
+        shapes = [
+            rng.standard_normal(cells) + 1j * rng.standard_normal(cells) if cells > 1 else np.ones(1) for _ in modes
+        ]
+
+        def field(steps):
+            return sum(
+                np.real(psi[None, :] * np.exp(1j * (self.omega * (1 + d) * steps * self.dt + p))[:, None])
+                * (a * np.exp(-steps / tau))[:, None]
+                for psi, (a, d, tau, p) in zip(shapes, modes)
+            )
+
+        def dft(steps):
+            return np.sum(np.exp(1j * self.omega * steps * self.dt)[:, None] * field(steps), axis=0)
+
+        w = int(0.125 * T)
+        full = dft(np.arange(T))
+        late = tuple(jnp.asarray(dft(np.arange(T - k * w, T - (k - 1) * w))).reshape(1, 1, cells) for k in (3, 2, 1))
+        true = np.linalg.norm(dft(np.arange(T, T + 60 * int(max(m[2] for m in modes))))) / np.linalg.norm(full)
+        left = jnp.asarray(field(np.asarray([T]))).reshape(1, cells)
+        return left, jnp.asarray(full).reshape(1, 1, cells), late, true
+
+    def _estimate(self, left, full, late):
+        from fdtdx.adjoint import dft_tail
+
+        return float(dft_tail(left, full, late, (self.omega,), self.dt)[0])
 
     def test_decayed_field_has_a_negligible_tail(self):
-        from fdtdx.adjoint import dft_tail
-
-        left, phasor = self._signal(tau_steps=20.0)
-        assert float(dft_tail(left, phasor, (self.omega,), self.dt)) < 1e-6
+        assert self._estimate(*self._record([(1.0, 0.0, 20.0, 0.0)])[:3]) < 1e-6
 
     def test_undecayed_field_has_a_large_tail(self):
-        from fdtdx.adjoint import dft_tail
+        # ten periods of an undamped carrier: the late windows do not decay, so the tail has no bound;
+        # the estimate saturates far above the default tolerance (1e-2)
+        assert self._estimate(*self._record([(1.0, 0.0, 1e6, 0.0)], T=200)[:3]) > 0.1
 
-        # ten periods of an undamped carrier: 1 / (|1 - e^{i w dt}| * T / 2) = 3.2e-02
-        left, phasor = self._signal(tau_steps=1e6, T=200)
-        assert float(dft_tail(left, phasor, (self.omega,), self.dt)) > 3e-2
-
-    def test_frequencies_without_a_phasor_are_ignored(self):
-        from fdtdx.adjoint import dft_tail
-
-        left = jnp.ones((1, 1))
-        phasor = jnp.asarray([[[100.0 + 0j]], [[1e-9 + 0j]]])  # second frequency: nothing recorded
-        eta = float(dft_tail(left, phasor, (self.omega, 2 * self.omega), self.dt))
+    def test_resonant_ringing_is_estimated_from_the_late_windows(self):
+        """A mode ringing at the frequency: the end-field (static) estimate alone is several times too small.
+        On one cell the window ratio is taken with its counter-rotating uncertainty (1.3x high here)."""
+        left, full, late, true = self._record([(1.0, 0.0, 150.0, 0.0)])
         gap = abs(1 - np.exp(1j * self.omega * self.dt))
-        np.testing.assert_allclose(eta, 1.0 / (gap * 100.0), rtol=1e-12)
+        static = abs(float(left[0, 0])) / (gap * abs(complex(full[0, 0, 0])))
+        assert static < true / 5
+        eta = self._estimate(left, full, late)
+        assert true / 1.1 < eta < 1.5 * true, f"estimate {eta:.3e}, true {true:.3e}"
+
+    @pytest.mark.parametrize("detune, tau, T", [(0.3, 150.0, 400), (0.05, 400.0, 800), (0.1, 300.0, 400)])
+    def test_off_resonant_ringing_is_estimated_within_a_factor(self, detune, tau, T):
+        """One cell: one mode, which cannot tell a real carrier's two rotating parts apart (1.42x low at
+        detune 0.3). Over many cells the two-mode fit separates them."""
+        left, full, late, true = self._record([(1.0, detune, tau, 1.0)], T=T)
+        eta = self._estimate(left, full, late)
+        assert true / 1.5 < eta < 5 * max(true, 1e-9), f"one cell: estimate {eta:.3e}, true {true:.3e}"
+        left, full, late, true = self._record([(1.0, detune, tau, 1.0)], T=T, cells=32)
+        eta = self._estimate(left, full, late)
+        assert true / 1.1 < eta < 5 * max(true, 1e-9), f"32 cells: estimate {eta:.3e}, true {true:.3e}"
+
+    def test_a_slow_mode_under_a_fast_one_is_not_missed(self):
+        """Two modes with their own shapes: the fast one dominates the first window, the slow one the tail.
+        One mode fitted to the last two windows read the eps-12 Device's mixture 1.5x to 6.7x low."""
+        modes = [(3000.0, 0.0, 40.0, 0.0), (1.0, 0.04, 400.0, 0.7)]
+        left, full, late, true = self._record(modes, T=400, cells=32)
+        eta = self._estimate(left, full, late)
+        assert true / 1.3 < eta < 5 * true, f"estimate {eta:.3e}, true {true:.3e}"
+
+    def test_a_standing_wave_on_resonance_is_not_missed(self):
+        """A real mode at the frequency, decaying by 1% per window, shape shared by its two rotating
+        parts (collinear windows, one mode): their boundary terms moved the ratio by as much as
+        ``|1 - z|``, and the estimate read 3.7x low (review 2026-09-25)."""
+        from fdtdx.adjoint import dft_tail
+
+        n, cells = 1574, 64
+        w = int(0.125 * n)
+        omega = 2 * np.pi / 21.0
+        steps = np.arange(0, 80 * n)
+        s = np.cos(omega * steps) * np.exp(-5e-5 * steps)
+        s[: n // 3] = 0.0
+        cum = np.concatenate([[0], np.cumsum(s * np.exp(1j * omega * steps))])
+        shape = np.sin(np.linspace(0.1, 3.0, cells))
+        late = tuple(
+            jnp.asarray(((cum[n - k * w + w] - cum[n - k * w]) * shape).reshape(1, 1, cells)) for k in (3, 2, 1)
+        )
+        tail = np.linalg.norm((cum[-1] - cum[n]) * shape)
+        # a converged part on top, so the true relative tail is about 2e-2
+        extra = np.cos(np.linspace(0, 7, cells)) + 0.3j
+        phasor = cum[n] * shape + extra * (tail / 2e-2) / np.linalg.norm(extra)
+        true = tail / np.linalg.norm(phasor)
+        eta = float(
+            dft_tail(
+                jnp.asarray((s[n - 1] * shape).reshape(1, cells)),
+                jnp.asarray(phasor.reshape(1, 1, cells)),
+                late,
+                (omega,),
+                1.0,
+            )[0]
+        )
+        assert eta > true / 1.3, f"estimate {eta:.3e}, true {true:.3e}"
+
+    def test_float32_keeps_a_slow_mode_under_a_fast_one(self):
+        """The fit in complex64: a slow mode (z = 0.999) at 3e-3 of a fast one (z = 0.5). The Gram
+        determinant read 0.09 of its tail, one Gram-Schmidt projection 0.39."""
+        from fdtdx.adjoint import dft_tail
+
+        rng = np.random.default_rng(7)
+        u, s = (rng.normal(size=1000) + 1j * rng.normal(size=1000) for _ in range(2))
+        zs, vs = (0.5, 0.999), (u, 3e-3 * s)
+        late = tuple(
+            jnp.asarray(sum(v * z**k for v, z in zip(vs, zs)).reshape(1, 1, -1), dtype=jnp.complex64) for k in range(3)
+        )
+        tail = np.linalg.norm(sum(v * z**3 / (1 - z) for v, z in zip(vs, zs)))
+        phasor = rng.normal(size=1000) + 1j * rng.normal(size=1000)
+        phasor *= tail / np.linalg.norm(phasor) / 3e-2
+        left = jnp.zeros((1, 1000), dtype=jnp.float32)
+        full = jnp.asarray(phasor.reshape(1, 1, -1), dtype=jnp.complex64)
+        eta = float(dft_tail(left, full, late, (self.omega,), self.dt)[0])
+        np.testing.assert_allclose(eta, 3e-2, rtol=0.02)
+
+    def test_cell_tails_do_not_underflow_in_float32(self):
+        """Per-cell norms of adjoint phasors of 1e-21 (a cotangent of a figure of merit in SI watts)
+        squared to 0 and switched the gradient check off."""
+        from fdtdx.adjoint.kernel import component_norms, truncation_norms
+
+        x = jnp.full((1, 3, 4), 1e-21 + 1e-21j, dtype=jnp.complex64)
+        np.testing.assert_allclose(np.asarray(component_norms(x)), np.sqrt(6) * 1e-21, rtol=1e-5)
+        lam = jnp.full((1, 1, 3, 4), 1e-21 + 0j, dtype=jnp.complex64)
+        fwd = jnp.ones((1, 1, 3, 4), dtype=jnp.complex64)
+        tails = jnp.full((1, 4), 1e-3, dtype=jnp.float32)
+        inv_eps = jnp.ones((1, 4), dtype=jnp.float32)
+        norms = truncation_norms(lam, fwd, tails * 1e-21, tails, inv_eps, np.asarray([1.0 + 0j]))
+        assert float(norms[0]) > 0
+
+    def test_an_arriving_field_at_an_unread_frequency_counts_nothing(self):
+        """Its forward tails are infinite, but with no adjoint field there (not read) the term is 0, not NaN."""
+        from fdtdx.adjoint.kernel import truncation_norms
+
+        lam = jnp.stack([jnp.ones((3, 4)), jnp.zeros((3, 4))])[None].astype(jnp.complex64)
+        fwd = jnp.ones((1, 2, 3, 4), dtype=jnp.complex64)
+        forward_tails = jnp.asarray([[1e-3] * 4, [jnp.inf] * 4], dtype=jnp.float32)
+        adjoint_tails = jnp.asarray([[1e-3] * 4, [0.0] * 4], dtype=jnp.float32)
+        norms = truncation_norms(lam, fwd, adjoint_tails, forward_tails, jnp.ones((1, 4)), np.asarray([1.0, 1.0]))
+        assert np.isfinite(float(norms[0])) and float(norms[1]) == 0.0
+
+    def test_a_non_finite_truncation_refuses(self):
+        """An overflowing continuation (float32) made the truncation NaN, which where(total > 0) read as 0."""
+        from fdtdx.adjoint.kernel import gradient_error_estimate
+
+        estimate = gradient_error_estimate(jnp.asarray([jnp.nan, 1.0]), jnp.asarray(1.0), jnp.asarray(0.0))
+        assert not bool(estimate <= 1e-2)
+
+    def test_a_field_still_arriving_is_refused(self):
+        """An echo reaching the monitor in the last window: a series continuation read 4.5e-5 where the
+        figure of merit was 89% off (review 2026-09-25). Zero earlier windows (a front, or float32
+        flushing them) are the same case."""
+        from fdtdx.adjoint import dft_tail
+
+        rng = np.random.default_rng(3)
+        for cells in (1, 32):
+            shape = (rng.normal(size=cells) + 1j * rng.normal(size=cells)).reshape(1, 1, cells)
+            full = jnp.asarray(10.0 * shape)
+            for early in (1e-6, 0.0):
+                late = (jnp.asarray(early * shape), jnp.asarray(early * shape), jnp.asarray(1e-2 * shape))
+                left = jnp.zeros((1, cells))
+                assert not float(dft_tail(left, full, late, (self.omega,), self.dt)[0]) <= 1e-2
+
+    def test_an_arrival_behind_a_decaying_first_window_is_refused(self):
+        """A Device's ringing in the first window (n0 = n2 / 9.5) hid an echo arriving in the last one
+        (n2 / n1 = 590): accepted with the figure of merit 80% off (review 2026-09-26)."""
+        from fdtdx.adjoint import dft_tail
+
+        rng = np.random.default_rng(4)
+        shape = (rng.normal(size=32) + 1j * rng.normal(size=32)).reshape(1, 1, 32)
+        other = (rng.normal(size=32) + 1j * rng.normal(size=32)).reshape(1, 1, 32)
+        late = (jnp.asarray(2.2e-5 * other), jnp.asarray(3.5e-7 * other), jnp.asarray(2.1e-4 * shape))
+        eta = float(dft_tail(jnp.zeros((1, 32)), jnp.asarray(shape), late, (self.omega,), self.dt)[0])
+        assert not eta <= 1e-2
+
+    def test_a_standing_wave_with_a_small_remainder_is_not_missed(self):
+        """A standing wave on resonance (collinear windows) plus 1e-3 on another shape switched to the
+        two-mode fit, which mixed the wave's two rotating parts into one mode: 0.28 of the tail."""
+        from fdtdx.adjoint import dft_tail
+
+        n, cells = 1574, 64
+        w = int(0.125 * n)
+        omega = 2 * np.pi / 21.0
+        steps = np.arange(0, 80 * n)
+        s = np.cos(omega * steps) * np.exp(-5e-5 * steps)
+        s[: n // 3] = 0.0
+        other = np.cos(omega * 1.3 * steps) * np.exp(-steps / 400.0) * 1e-3
+        cum_s = np.concatenate([[0], np.cumsum(s * np.exp(1j * omega * steps))])
+        cum_o = np.concatenate([[0], np.cumsum(other * np.exp(1j * omega * steps))])
+        wave = np.sin(np.linspace(0.1, 3.0, cells))
+        rest = np.cos(np.linspace(0.0, 5.0, cells))
+
+        def record(lo, hi):
+            return (cum_s[hi] - cum_s[lo]) * wave + (cum_o[hi] - cum_o[lo]) * rest
+
+        late = tuple(jnp.asarray(record(n - k * w, n - (k - 1) * w).reshape(1, 1, cells)) for k in (3, 2, 1))
+        tail = np.linalg.norm(record(n, len(steps)))
+        extra = np.cos(np.linspace(0, 7, cells)) + 0.3j
+        phasor = record(0, n) + extra * (tail / 2e-2) / np.linalg.norm(extra)
+        true = tail / np.linalg.norm(phasor)
+        left = jnp.asarray((s[n - 1] * wave + other[n - 1] * rest).reshape(1, cells))
+        eta = float(dft_tail(left, jnp.asarray(phasor.reshape(1, 1, cells)), late, (omega,), 1.0)[0])
+        assert eta > true / 1.3, f"estimate {eta:.3e}, true {true:.3e}"
+
+    def test_per_frequency_and_float32_safe(self):
+        from fdtdx.adjoint import dft_tail
+
+        left = jnp.full((1, 1), 1e-25, dtype=jnp.float32)
+        full = jnp.asarray([[[1e-20 + 0j]], [[1e-22 + 0j]]], dtype=jnp.complex64)
+        late = (jnp.zeros_like(full),) * 3
+        eta = np.asarray(dft_tail(left, full, late, (self.omega, 2 * self.omega), self.dt))
+        gap = np.abs(1 - np.exp(1j * np.asarray([1.0, 2.0]) * self.omega * self.dt))
+        # no underflow to 0 in float32: the static estimate per frequency
+        np.testing.assert_allclose(eta, 1e-25 / (gap * np.asarray([1e-20, 1e-22])), rtol=1e-4)
 
 
 # --------------------------------------------------------------------------- 3. design coverage
@@ -448,12 +642,51 @@ class TestSceneRefusals:
         weights = [pml_weight(objects, b) for rec in recs for b in rec.blocks]
         assert any(w is not None for w in weights) == reaches
 
-    def test_objective_monitors_must_share_frequencies(self):
-        """They share one amplitude solve; the second would be driven at the first one's frequency."""
-        other = [fdtdx.WaveCharacter(wavelength=650e-9)]
+    def test_objective_monitors_at_different_frequencies_share_one_solve(self):
+        """One adjoint solve over the union of their frequencies, each monitor's cotangent at its own
+        rows (refused before). Parity with checkpointed: TestMonitorsAtDifferentFrequencies."""
+        from fdtdx.adjoint.objective import objective_frequencies
+
+        other = [fdtdx.WaveCharacter(wavelength=700e-9), fdtdx.WaveCharacter(wavelength=600e-9)]
         objects, arrays, config = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
-        with pytest.raises(ValueError, match="must share frequencies"):
+        omegas, _, rows = objective_frequencies([objects["mon"], objects["mon2"]])
+        assert len(omegas) == 2 and rows[0].tolist() == [0] and rows[1].tolist() == [1, 0]
+        fn = reciprocity_phasor_fn(
+            arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"), tail_tolerance=None
+        )
+        mon, mon2 = fn(arrays.inv_permittivities)
+        assert mon.shape[1] == 1 and mon2.shape[1] == 2
+
+    def test_a_monitor_named_twice_is_refused(self):
+        """Both names drove one adjoint current, and one cotangent was dropped (review 2026-09-25)."""
+        objects, arrays, config = _scene()
+        with pytest.raises(ValueError, match="more than once"):
+            reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon"))
+
+    def test_frequencies_written_differently_are_named(self):
+        """600e-9 and float32(600e-9), 3.5e-8 apart: no run separates them, and the amplitude solve's advice
+        to run longer could not help (review 2026-09-26)."""
+        other = [fdtdx.WaveCharacter(wavelength=float(np.float32(600e-9)))]
+        objects, arrays, config = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
+        with pytest.raises(ValueError, match="same WaveCharacter"):
             reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors=("mon", "mon2"))
+
+    def test_the_alias_limit_is_above_float32_round_off(self):
+        """A float32 run's waveform, evaluated in float32, folds 1.5e-6 of a row from round-off alone."""
+        from fdtdx.adjoint.validation import ALIAS_TOLERANCE, alias_limit
+
+        _, _, config = _scene()
+        assert alias_limit(config.aset("dtype", jnp.float32)) > 1e-5
+        assert alias_limit(config.aset("dtype", jnp.float64)) == ALIAS_TOLERANCE
+
+    def test_frequencies_merge_only_when_stored_equal(self):
+        """At rtol 1e-6, frequencies 5e-7 apart shared one row (3e-5 off, unestimated)."""
+        from fdtdx.adjoint.objective import objective_frequencies
+
+        for lead, count in ((600e-9, 1), (600e-9 * (1 + 5e-7), 2)):
+            other = [fdtdx.WaveCharacter(wavelength=lead)]
+            objects, _, _ = _scene(wavelengths=(600e-9,), regions=(("mon2", (9, 6, 6), (1, 1, 1), other),))
+            assert len(objective_frequencies([objects["mon"], objects["mon2"]])[0]) == count
 
     def test_dispersive_device_material_is_refused_at_phasor_level_too(self):
         """apply_params rewrites its ADE coefficients from the design; phasor_fn kept the placed ones (FoM 1.08x)."""
@@ -569,6 +802,204 @@ class TestRunFdtdReciprocity:
         """A QuasiUniformGrid resolves to a grid that is not uniform overall; with the GradientConfig
         set inside the trace its edges are tracers, which used to be refused."""
         self._trace(_mon_power, grid=QuasiUniformGrid(dx=50e-9, dy=50e-9, dz=40e-9))
+
+    def test_a_raw_material_array_is_refused(self):
+        """The gradient is filled inside the Devices only: w.r.t. inv_permittivities itself, 97.8% of
+        the checkpointed gradient norm lay outside them and came back a silent zero (rel 0.99)."""
+        objects, arrays, config, _ = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(inv_eps):
+            return _mon_power(fdtdx.run_fdtd(arrays.aset("inv_permittivities", inv_eps), objects, cfg, _KEY)[1])
+
+        with pytest.raises(NotImplementedError, match="not written by apply_params"):
+            jax.make_jaxpr(jax.grad(loss))(arrays.inv_permittivities)
+
+    def test_an_array_edited_after_apply_params_is_refused(self):
+        """A background parameter or a blur after apply_params: silent zero outside, and a blur also
+        corrupted the Device gradient (rel 0.15)."""
+
+        def perturb(arrays, p):
+            return arrays.aset("inv_permittivities", arrays.inv_permittivities * (1.0 + 0.0 * jnp.mean(p)))
+
+        with pytest.raises(NotImplementedError, match="not written by apply_params"):
+            self._trace(_mon_power, perturb)
+
+    def test_a_background_written_before_apply_params_is_refused(self):
+        """A background parameter written into the arrays before apply_params: apply_params' output is
+        the very array it returned, but depends on the parameter outside the Devices (rel 0.96, silent
+        before its input probe)."""
+        objects, arrays, config, params = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p, background):
+            arrs = arrays.aset("inv_permittivities", arrays.inv_permittivities / background)
+            arrs, objs, _ = apply_params(arrs, objects, p, _KEY)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY)[1])
+
+        with pytest.raises(NotImplementedError, match="not written by apply_params"):
+            jax.make_jaxpr(jax.grad(loss, argnums=1))(params, 1.2)
+        # the same loss differentiated with respect to the Device parameters only traces
+        jax.make_jaxpr(jax.grad(loss, argnums=0))(params, 1.2)
+
+    def test_differentiated_dispersion_coefficients_are_refused(self):
+        """A differentiated static Lorentz block: checkpointed and finite differences agree (c3: 1e-6),
+        this returned zero for c1, c2 and c3."""
+
+        def perturb(arrays, p):
+            return arrays.aset("dispersive_c3", arrays.dispersive_c3 * (1.0 + jnp.mean(p)))
+
+        blocks = (("lorentz", (1, 1, 1), (2, 2, 2), _LORENTZ),)
+        with pytest.raises(NotImplementedError, match=r"arrays\.dispersive_c3"):
+            self._trace(_mon_power, perturb, blocks=blocks)
+        # undifferentiated, a dispersive block beside a non-dispersive Device traces
+        self._trace(_mon_power, blocks=blocks)
+
+    def test_a_traced_frozen_object_field_is_refused(self):
+        """A source amplitude under jax.grad: an UnexpectedTracerError before this refusal."""
+        objects, arrays, config, params = _scene(return_params=True, extra=((_dipole(), (1, 6, 6)),))
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(scale):
+            arrs, objs, _ = apply_params(arrays, objects, params, _KEY)
+            dip = next(o for o in objs.object_list if isinstance(o, fdtdx.PointDipoleSource))
+            objs = objs.aset("object_list", [o.aset("amplitude", scale) if o is dip else o for o in objs.object_list])
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY)[1])
+
+        with pytest.raises(NotImplementedError, match="frozen object fields"):
+            jax.make_jaxpr(jax.grad(loss))(1.0)
+
+    @pytest.mark.parametrize("stage", ["jit", "filter_jit", "checkpoint"])
+    def test_a_background_under_a_staged_loss_is_refused(self, stage):
+        """jax.grad(jax.jit(loss)): the probe's JVP runs only when the staged program is differentiated,
+        after apply_params returned; read then, the flag was empty and d/dbg came back 0 (review 2026-09-25)."""
+        import equinox as eqx
+
+        objects, arrays, config, params = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p, background):
+            arrs = arrays.aset("inv_permittivities", arrays.inv_permittivities / background)
+            arrs, objs, _ = apply_params(arrs, objects, p, _KEY)
+            # no progress bar: its ordered host callback cannot be rematerialized (natively as well)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY, show_progress=False)[1])
+
+        staged = {"jit": jax.jit, "filter_jit": eqx.filter_jit, "checkpoint": jax.checkpoint}[stage](loss)
+        # every time, in any order (JAX memoizes the staged rule: a flag read there fired once at most, and
+        # after a Device-parameter gradient never)
+        jax.make_jaxpr(jax.grad(staged, argnums=0))(params, 1.2)
+        for argnums in (1, 1, (0, 1)):
+            with pytest.raises(NotImplementedError, match="apply_params"):
+                jax.make_jaxpr(jax.grad(staged, argnums=argnums))(params, 1.2)
+        jax.make_jaxpr(jax.grad(staged, argnums=0))(params, 1.2)
+
+    def test_a_refusal_leaves_no_flag_for_the_next_gradient(self):
+        """A refused differentiation of inv_permeabilities left the probe's flag set, and the next gradient,
+        with respect to the Device parameters only, was refused too (review 2026-09-26)."""
+        objects, arrays, config, params = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p, s):
+            arrs = arrays.aset("inv_permittivities", arrays.inv_permittivities / s)
+            arrs = arrs.aset("inv_permeabilities", arrs.inv_permeabilities / s)
+            arrs, objs, _ = apply_params(arrs, objects, p, _KEY)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY, show_progress=False)[1])
+
+        staged = jax.jit(loss)
+        with pytest.raises(NotImplementedError):
+            jax.make_jaxpr(jax.grad(staged, argnums=1))(params, 1.05)
+        jax.make_jaxpr(jax.grad(staged, argnums=0))(params, 1.05)
+
+    def test_a_jit_value_in_a_frozen_field_under_grad_of_jit_is_refused_clearly(self):
+        """jax.grad(jax.jit(loss)) with a jit argument stored in an object field: a bare 'No constant
+        handler' TypeError before (jax.jit(jax.grad(loss)) is exact and traces)."""
+        wave = fdtdx.WaveCharacter(wavelength=600e-9)
+        pulse = fdtdx.GaussianPulseProfile(center_wave=wave, spectral_width=fdtdx.WaveCharacter(frequency=2.5e14))
+        dipole = fdtdx.PointDipoleSource(
+            name="dip", partial_grid_shape=(1, 1, 1), wave_character=wave, polarization=2, temporal_profile=pulse
+        )
+        objects, arrays, config, params = _scene(return_params=True, extra=((dipole, (1, 6, 6)),))
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p, scale):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            dip = next(o for o in objs.object_list if isinstance(o, fdtdx.PointDipoleSource))
+            objs = objs.aset("object_list", [o.aset("amplitude", scale) if o is dip else o for o in objs.object_list])
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY, show_progress=False)[1])
+
+        with pytest.raises(NotImplementedError, match="differentiated from outside"):
+            jax.make_jaxpr(jax.grad(jax.jit(loss), argnums=0))(params, 0.8)
+
+    def test_a_device_missing_from_the_objects_is_refused(self):
+        """apply_params wrote two Devices, run_fdtd got a container with one: the other's gradient was 0."""
+        from fdtdx.fdtd.container import ObjectContainer
+
+        objects, arrays, config, params = _scene(
+            return_params=True, devices=(("a", (1, 1, 1), (3, 3, 3)), ("b", (6, 6, 6), (3, 3, 3)))
+        )
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            kept = [o for o in objs.object_list if o.name != "b"]
+            volume = next(i for i, o in enumerate(kept) if o is objs.volume)
+            return _mon_power(fdtdx.run_fdtd(arrs, ObjectContainer(object_list=kept, volume_idx=volume), cfg, _KEY)[1])
+
+        with pytest.raises(NotImplementedError, match="do not contain"):
+            jax.make_jaxpr(jax.grad(loss))(params)
+
+    def test_an_undifferentiated_jit_argument_in_a_frozen_field_traces(self):
+        """A source amplitude passed to jax.jit and stored in the objects, the parameters differentiated:
+        exact (rel 2.4e-10), and refused before (review 2026-09-25)."""
+        wave = fdtdx.WaveCharacter(wavelength=600e-9)
+        pulse = fdtdx.GaussianPulseProfile(center_wave=wave, spectral_width=fdtdx.WaveCharacter(frequency=2.5e14))
+        dipole = fdtdx.PointDipoleSource(
+            name="dip", partial_grid_shape=(1, 1, 1), wave_character=wave, polarization=2, temporal_profile=pulse
+        )
+        objects, arrays, config, params = _scene(return_params=True, extra=((dipole, (1, 6, 6)),))
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p, scale):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            dip = next(o for o in objs.object_list if isinstance(o, fdtdx.PointDipoleSource))
+            objs = objs.aset("object_list", [o.aset("amplitude", scale) if o is dip else o for o in objs.object_list])
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY)[1])
+
+        jax.make_jaxpr(jax.jit(jax.grad(loss, argnums=0)))(params, 0.8)
+
+    def test_reverse_mode_when_jax_linearizes_by_jvp(self):
+        """With jax_use_direct_linearize off, jax.grad reaches run_fdtd as a JVPTracer: not forward mode."""
+        objects, arrays, config, params = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY)[1])
+
+        previous = jax.config.jax_use_direct_linearize
+        jax.config.update("jax_use_direct_linearize", False)
+        try:
+            jax.make_jaxpr(jax.grad(loss))(params)
+        finally:
+            jax.config.update("jax_use_direct_linearize", previous)
+
+    def test_forward_mode_is_refused(self):
+        """jax.jvp and jacfwd: a generic TypeError before this refusal (forward over reverse works)."""
+        objects, arrays, config, params = _scene(return_params=True)
+        cfg = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+
+        def loss(p):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            return _mon_power(fdtdx.run_fdtd(arrs, objs, cfg, _KEY)[1])
+
+        with pytest.raises(NotImplementedError, match="Forward-mode"):
+            jax.jvp(loss, (params,), (params,))
+
+    def test_a_recorder_is_refused(self):
+        """Kept after a one-string switch from reversible, it filled the recording every step (13.7x memory)."""
+        recorder = fdtdx.Recorder(modules=[fdtdx.DtypeConversion(dtype=jnp.bfloat16)])
+        with pytest.raises(Exception, match="drop it for method='reciprocity'"):
+            GradientConfig(method="reciprocity", recorder=recorder)
 
 
 class TestReversibleConductivity:

@@ -48,6 +48,12 @@ class GradientConfig(TreeClass):
     #: by the ``"checkpointed"`` method. Must not exceed ``time_steps_total - 1``.
     num_checkpoints_reversible: int = frozen_field(default=0)
 
+    #: ``"reciprocity"`` only: the largest estimated relative gradient error from phasors that have
+    #: not converged (fields still in the domain, or ringing, at the end of the run), above which the
+    #: gradient raises instead of being returned. ``None`` switches that check, and the source-waveform
+    #: checks (a source still on at the end, or carrying DC), off.
+    tail_tolerance: float | None = frozen_field(default=1e-2)
+
     def __post_init__(self):
         if self.method == "reversible" and self.recorder is None:
             raise Exception("Need Recorder in gradient config to compute reversible gradients")
@@ -55,6 +61,9 @@ class GradientConfig(TreeClass):
             raise Exception("Need Checkpoint Number in gradient config to compute checkpointed gradients")
         if self.num_checkpoints_reversible < 0:
             raise Exception("num_checkpoints_reversible must be >= 0")
+        if self.method == "reciprocity" and self.recorder is not None:
+            # the forward would still fill the reversible recording every step, for nothing (13.7x the memory)
+            raise Exception("A Recorder is used by method='reversible' only; drop it for method='reciprocity'")
 
 
 @autoinit

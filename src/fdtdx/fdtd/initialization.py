@@ -1,9 +1,12 @@
 import math
 import warnings
+import weakref
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
+from jax.custom_derivatives import SymbolicZero
 from loguru import logger
 
 from fdtdx import constants
@@ -17,6 +20,7 @@ from fdtdx.core.jax.sharding import (
     sharding_preserving_set,
 )
 from fdtdx.core.jax.ste import straight_through_estimator
+from fdtdx.core.jax.utils import is_jax_tracer
 from fdtdx.dispersion import compute_pole_coefficients_tensor
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer
 from fdtdx.fdtd.symmetry import apply_mode_symmetry, make_symmetry_walls, reduce_resolved_slices
@@ -311,6 +315,91 @@ def place_objects(
     return objects_container, arrays, params, config, info
 
 
+@dataclass(frozen=True)
+class AppliedRecord:
+    """What one ``apply_params`` call wrote.
+
+    ``differentiated`` is its input probe's list, filled when the probe's JVP runs during the
+    call (eager ``jax.grad``, ``jax.jit(jax.grad(f))``), and read by ``run_fdtd``'s reciprocity
+    rule. ``consumed`` is marked by that rule when it is given the arrays: a probe whose JVP runs
+    after that (``jax.grad(jax.jit(f))``, where the staged program is differentiated after it was
+    traced) raises itself, since JAX memoizes what the rule sees and a flag read there fired once
+    at most (93% of the gradient dropped on the next call). ``devices`` are the grid slices of the
+    Devices written.
+    """
+
+    differentiated: list
+    devices: tuple
+    consumed: list
+
+
+#: The material arrays ``apply_params`` returned, weakly, by ``id``, with their :class:`AppliedRecord`:
+#: ``run_fdtd`` with ``GradientConfig(method="reciprocity")`` gives the gradient inside the Devices
+#: only, so it refuses a differentiated material array that ``apply_params`` did not write.
+_APPLIED_ARRAYS: dict[int, tuple[weakref.ref, AppliedRecord]] = {}
+
+
+def _mark_applied(record: AppliedRecord, *values: Any) -> None:
+    for value in values:
+        if value is None:
+            continue
+        key = id(value)
+
+        def forget(ref, key=key):
+            entry = _APPLIED_ARRAYS.get(key)
+            if entry is not None and entry[0] is ref:
+                del _APPLIED_ARRAYS[key]
+
+        try:
+            _APPLIED_ARRAYS[key] = (weakref.ref(value, forget), record)
+        except TypeError:  # pragma: no cover - every jax array and tracer is weak-referenceable
+            continue
+
+
+def applied_record(value: Any) -> AppliedRecord | None:
+    """The record of the ``apply_params`` call that returned ``value`` (the very object), or ``None``."""
+    entry = _APPLIED_ARRAYS.get(id(value))
+    return entry[1] if entry is not None and entry[0]() is value else None
+
+
+def written_by_apply_params(value: Any) -> bool:
+    """Whether ``value`` is a material array ``apply_params`` returned (the very object, unmodified),
+    from input material arrays that were not differentiated (as far as known now: see
+    :class:`AppliedRecord`)."""
+    record = applied_record(value)
+    return record is not None and not record.differentiated
+
+
+def _perturbation_probe(record: AppliedRecord) -> Any:
+    """An identity whose JVP records, into ``record.differentiated``, whether its input is differentiated,
+    and refuses it outright once a reciprocity ``run_fdtd`` consumed the record (see :class:`AppliedRecord`).
+
+    A ``custom_jvp`` with symbolic zeros: a zero tangent (a constant input) is left alone, so
+    values, gradients and forward mode are unchanged in every method.
+    """
+
+    @jax.custom_jvp
+    def probe(x):
+        return x
+
+    def probe_jvp(primals, tangents):
+        (x,), (t,) = primals, tangents
+        if not isinstance(t, SymbolicZero):
+            if record.consumed:
+                raise NotImplementedError(
+                    "GradientConfig(method='reciprocity') differentiates the material arrays apply_params writes "
+                    "inside the Devices only, but the arrays apply_params was given depend on the differentiated "
+                    "parameters (a background written before apply_params), under a staged loss "
+                    "(jax.grad(jax.jit(f)), jax.checkpoint): their sensitivity outside the Devices would be dropped. "
+                    "Differentiate Device parameters only, or use method='checkpointed'."
+                )
+            record.differentiated.append(True)
+        return x, t
+
+    probe.defjvp(probe_jvp, symbolic_zeros=True)
+    return probe
+
+
 def apply_params(
     arrays: ArrayContainer,
     objects: ObjectContainer,
@@ -346,6 +435,21 @@ def apply_params(
     # additionally allows 9 (row-major 3x3 tensor, oriented poles).
     num_disp_components = arrays.dispersive_c1.shape[1] if arrays.dispersive_c1 is not None else 1
     num_disp_coupling_components = arrays.dispersive_c3.shape[1] if arrays.dispersive_c3 is not None else 1
+
+    # material arrays that already depend on the differentiated parameters (a background written
+    # before this call) carry that dependence outside the Devices too: such outputs are not marked.
+    # Only traced values are probed: a concrete array carries no derivative, and outside a trace
+    # apply_params runs as it always has
+    record = AppliedRecord([], tuple(d.grid_slice_tuple for d in objects.devices), [])
+    probe = _perturbation_probe(record)
+    for name in (
+        "inv_permittivities",
+        "initial_inv_permittivities",
+        "electric_conductivity",
+        "initial_electric_conductivity",
+    ):
+        if is_jax_tracer(getattr(arrays, name)):
+            arrays = arrays.aset(name, probe(getattr(arrays, name)))
 
     if arrays.initial_inv_permittivities is not None:
         arrays = arrays.at["inv_permittivities"].set(arrays.initial_inv_permittivities)
@@ -392,6 +496,10 @@ def apply_params(
             allowed_c1_arr = jnp.asarray(allowed_c1_np, dtype=arrays.dispersive_c1.dtype)
             allowed_c2_arr = jnp.asarray(allowed_c2_np, dtype=arrays.dispersive_c2.dtype)
             allowed_c3_arr = jnp.asarray(allowed_c3_np, dtype=arrays.dispersive_c3.dtype)
+        # coefficients independent of the parameters (no dispersive Device material) are written as
+        # constants, not as a traced blend of equal rows: same values and gradient, and a
+        # differentiated coefficient then always means the caller differentiates it
+        constant_dispersion = write_dispersive and not any(m.is_dispersive for m in device.materials.values())
 
         # Like the dispersion, the conductivity is written whenever the scene stores one, so a lossy
         # Device material is lossy and a Device over a lossy block does not keep the block's loss.
@@ -500,6 +608,13 @@ def apply_params(
                 and arrays.dispersive_c2 is not None
                 and arrays.dispersive_c3 is not None
             )
+            if constant_dispersion:
+                assert allowed_c1_arr is not None and allowed_c2_arr is not None and allowed_c3_arr is not None
+                grid = tuple(int(n) for n in cur_material_indices.shape)
+                new_c1_slice, new_c2_slice, new_c3_slice = (
+                    jnp.broadcast_to(allowed[0][:, :, None, None, None], (*allowed.shape[1:], *grid))
+                    for allowed in (allowed_c1_arr, allowed_c2_arr, allowed_c3_arr)
+                )
             new_c1 = arrays.dispersive_c1.at[:, :, *device.grid_slice].set(new_c1_slice)
             new_c2 = arrays.dispersive_c2.at[:, :, *device.grid_slice].set(new_c2_slice)
             new_c3 = arrays.dispersive_c3.at[:, :, *device.grid_slice].set(new_c3_slice)
@@ -539,6 +654,7 @@ def apply_params(
         volume_idx=objects.volume_idx,
     )
 
+    _mark_applied(record, arrays.inv_permittivities, arrays.electric_conductivity)
     return arrays, new_objects, info
 
 

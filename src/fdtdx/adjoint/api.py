@@ -43,15 +43,15 @@ def reciprocity_phasor_fn(
         objective_detectors: the monitor, or monitors, the figure of merit reads: phasor
             detectors at their stock settings (either scaling mode, exact interpolation,
             ``dft_subsample``), a box-mode field projection, a flux box. Several cost one
-            adjoint solve together. They must share frequencies.
+            adjoint solve together, at the union of their frequencies.
         design_detector: where the gradient is taken; ``None`` is every Device. Otherwise the
             name(s) of placed objects whose cells form the region (a Device, a detector of any
             configuration, a static block). The gradient is zero outside it.
         window: envelope of the adjoint excitation; :func:`~fdtdx.adjoint.kernel.gaussian_window`
             over the run by default.
         cond_limit: ceiling on the amplitude solve's condition number.
-        tail_tolerance: warn (:class:`~fdtdx.adjoint.kernel.ConvergenceWarning`) when a DFT tail
-            estimate exceeds this; ``None`` disables the warning.
+        tail_tolerance: raise when the gradient's estimated truncation error, or the objective
+            phasors' own truncation, exceeds this (checked on every call); ``None`` disables it.
 
     Returns:
         ``phasor_fn(inv_permittivities, electric_conductivity=None)``: the monitor's phasor
@@ -59,7 +59,8 @@ def reciprocity_phasor_fn(
         its whole state dict, to feed its own readout (``project``, ``compute_net_flux``).
         ``electric_conductivity`` (``None``: the scene's, held constant; refused when
         ``apply_params`` writes another one into a Device) is differentiated too.
-        ``phasor_fn.diagnostics`` holds the solve's ``cond`` and the latest convergence estimates.
+        ``phasor_fn.diagnostics`` holds the solve's ``cond`` and the latest gradient's convergence
+        estimates (written by gradient calls).
 
     Raises:
         NotImplementedError, ValueError: for a configuration the gradient would get wrong

@@ -20,8 +20,8 @@ Example, with ``objects, arrays, params, config`` straight from ``fdtdx.place_ob
     value, grad = jax.value_and_grad(loss)(params)  # grad is a ParameterContainer, like params
 
 The gradient equals ``jax.grad`` of ``apply_params`` then ``run_fdtd`` with
-``GradientConfig("checkpointed")`` once the fields have decayed (``param_fn.diagnostics`` and a
-:class:`ConvergenceWarning` report when they have not). Keyword arguments to ``param_fn`` go to
+``GradientConfig("checkpointed")`` once the fields have decayed; when they have not, the gradient
+raises instead (``tail_tolerance``), and ``param_fn.diagnostics`` holds the estimates. Keyword arguments to ``param_fn`` go to
 ``apply_params`` (``param_fn(params, beta=beta)``). :func:`reciprocity_phasor_fn` is the same one
 level down, as a function of ``inv_permittivities``. Configurations it would get wrong raise at
 setup (:mod:`fdtdx.adjoint.validation`).
@@ -34,12 +34,10 @@ Modules: :mod:`~fdtdx.adjoint.api` (entry points), :mod:`~fdtdx.adjoint.vjp` (th
 """
 
 from fdtdx.adjoint.api import ReciprocityParamFn, reciprocity_param_fn, reciprocity_phasor_fn
-from fdtdx.adjoint.kernel import ConvergenceWarning, PmlWarning, dft_tail, gaussian_window
+from fdtdx.adjoint.kernel import dft_tail, gaussian_window
 from fdtdx.adjoint.vjp import ReciprocityPhasorFn
 
 __all__ = [
-    "ConvergenceWarning",
-    "PmlWarning",
     "ReciprocityParamFn",
     "ReciprocityPhasorFn",
     "dft_tail",

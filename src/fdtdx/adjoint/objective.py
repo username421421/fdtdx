@@ -134,8 +134,9 @@ def pml_weight(objects: ObjectContainer, block: SliceTuple3D) -> np.ndarray | No
     """Per cell of an adjoint-current block, the local strength of the PML it lies in, or None.
 
     The strength is the PML's own CPML coefficient ``|a|``, normalised to its peak. It is graded
-    from zero at the interface, and the reciprocal pairing only fails where it is not small: a
-    current one cell into the PML is exact, deeper ones are not (box faces two cells deep: 1e-02).
+    from zero at the interface cell, which is exact; the reciprocal pairing fails wherever it is
+    not zero (a plane one cell deeper: 4e-4, silently), so such a block is refused
+    (:func:`~fdtdx.adjoint.validation.check_objectives_outside_pml`).
     """
     weight = np.zeros(_shape(block))
     for pml in objects.pml_objects:
@@ -277,12 +278,17 @@ def adjoint_sources(
     config: SimulationConfig,
     window: jax.Array,
     key: jax.Array,
+    angular_frequencies: Sequence[float] | None = None,
 ) -> list[AdjointCurrentSource]:
     """Zero-amplitude adjoint currents, placed on every block of every channel, in channel then block order.
 
-    The backward rule fills in the amplitudes, which are traced leaves.
+    The backward rule fills in the amplitudes, which are traced leaves. They carry
+    ``angular_frequencies`` (the detector's own by default): every objective frequency, when
+    several monitors recording different ones share the adjoint solve.
     """
-    omegas = tuple(float(w) for w in detector._angular_frequencies)
+    if angular_frequencies is None:
+        angular_frequencies = detector._angular_frequencies
+    omegas = tuple(float(w) for w in angular_frequencies)
     components = canonical_components(detector)
     sources = []
     for rec in recordings:
@@ -298,6 +304,34 @@ def adjoint_sources(
             )
             sources.append(source.place_on_grid(grid_slice_tuple=block, config=config, key=key))
     return sources
+
+
+def objective_frequencies(detectors: Sequence) -> tuple[tuple[float, ...], tuple, list[np.ndarray]]:
+    """The union of the monitors' frequencies, a wave character for each, and every monitor's rows in it.
+
+    In order of first appearance; frequencies within a few ulps of the dtype they are stored in
+    are one (merged at 1e-6, frequencies 5e-7 apart shared one row: 3e-5 off, unestimated). One
+    adjoint solve drives all of them: a monitor's cotangent fills its own rows of the adjoint target
+    and leaves the others at zero, so each frequency's adjoint field is the response to every
+    monitor that records it.
+    """
+    omegas: list[float] = []
+    waves: list = []
+    rows = []
+    for det in detectors:
+        idx = []
+        stored = np.asarray(det._angular_frequencies)
+        rtol = 4.0 * float(np.finfo(stored.dtype if np.issubdtype(stored.dtype, np.floating) else np.float64).eps)
+        for w, wave in zip(stored, det.wave_characters):
+            w = float(w)
+            hit = next((i for i, u in enumerate(omegas) if abs(u - w) <= rtol * abs(u)), None)
+            if hit is None:
+                omegas.append(w)
+                waves.append(wave)
+                hit = len(omegas) - 1
+            idx.append(hit)
+        rows.append(np.asarray(idx, dtype=np.int32))
+    return tuple(omegas), tuple(waves), rows
 
 
 def raw_scale(detector) -> float:

@@ -96,6 +96,22 @@ def make_design_detector(
     return det
 
 
+#: Share of the run each of the three late windows spans (the last three eighths).
+LATE_WINDOW = 0.125
+
+
+def late_windows(config: SimulationConfig) -> tuple[int, int, int]:
+    """The time steps at which the last three late windows start (each ``LATE_WINDOW`` long), oldest first.
+
+    Every solve runs in four segments split there (:func:`fdtdx.adjoint.vjp.segmented_solve`), so
+    the convergence estimate reads the phasors' growth over the three windows from snapshots,
+    without an extra detector or a per-step conditional.
+    """
+    n = int(config.time_steps_total)
+    w = max(1, int(LATE_WINDOW * n))
+    return max(n - 3 * w, 0), max(n - 2 * w, 0), n - w
+
+
 def internal_scene(
     arrays: ArrayContainer,
     objects: ObjectContainer,

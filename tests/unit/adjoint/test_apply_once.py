@@ -163,7 +163,7 @@ def test_identical_to_apply_params(kind):
 
 def test_param_fn_exposes_the_applied_scene():
     objects, arrays, params, config = _scene("mode")
-    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="port")
+    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="port", tail_tolerance=None)
     _, ref, _ = apply_params(arrays, objects, params, _KEY)
     _assert_same_leaves(param_fn.objects["port"], ref["port"], "port")
     _assert_same_leaves(param_fn.objects["src"], ref["src"], "src")
@@ -172,7 +172,7 @@ def test_param_fn_exposes_the_applied_scene():
 def test_param_fn_runs_under_jit():
     """The returned callable is an object, not a function: it must still jit (10 fs, value only)."""
     objects, arrays, params, config = _scene("plane")
-    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
+    param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon", tail_tolerance=None)
     eager = param_fn(params)
     jitted = jax.jit(param_fn)(params)
     assert eager.shape == jitted.shape

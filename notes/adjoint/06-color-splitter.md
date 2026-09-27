@@ -45,7 +45,7 @@ structure, float64, DC-free: 3.4e-03 at 320 fs, 1.8e-03 at 640 fs, with reciproc
 **The user's source carries DC.** `GaussianPulseProfile` at centre 1.875 / width 1.25
 (normalized) is a few-cycle pulse with |A(0)|/max|A| = 0.59. The static remainder never decays,
 floors both gradients at ~1e-2 and the FoM at ~1.5e-2, and keeps the objective-stage
-`ConvergenceWarning` firing. A sine carrier centred on the envelope removes it: on the PROFILE's
+`ConvergenceWarning` firing (now the objective check, which refuses the run). A sine carrier centred on the envelope removes it: on the PROFILE's
 own `WaveCharacter` only, `phase_shift = pi/2 - 2*pi*f0*t0` with `t0 = 6*sigma_t`,
 `sigma_t = 1/(2*pi*fw)` (scene.py shares `center_wave` with the source's `wave_character`, whose
 phase `get_amplitude` adds on top, so putting it on the shared object doubles it).

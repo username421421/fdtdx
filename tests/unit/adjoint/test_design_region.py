@@ -10,7 +10,13 @@ import jax.numpy as jnp
 import pytest
 
 import fdtdx
-from fdtdx.adjoint.design import DESIGN_DETECTOR_PREFIX, DESIGN_DETECTOR_SETTINGS, design_regions, internal_scene
+from fdtdx.adjoint.design import (
+    DESIGN_DETECTOR_PREFIX,
+    DESIGN_DETECTOR_SETTINGS,
+    design_regions,
+    internal_scene,
+    late_windows,
+)
 from fdtdx.adjoint.objective import canonical_components
 from fdtdx.config import SimulationConfig
 from fdtdx.core.grid import UniformGrid
@@ -21,8 +27,10 @@ _N = 12
 _WL = (600e-9, 700e-9)
 
 
-def _scene(*, devices=(("design", (4, 4, 4), (4, 4, 4)),), stock_detector=True, dtype=jnp.float64):
-    config = SimulationConfig(time=10e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", dtype=dtype)
+def _scene(
+    *, devices=(("design", (4, 4, 4), (4, 4, 4)),), stock_detector=True, dtype=jnp.float64, source=None, time=10e-15
+):
+    config = SimulationConfig(time=time, grid=UniformGrid(spacing=50e-9), backend="cpu", dtype=dtype)
     objs, cons = [], []
     vol = fdtdx.SimulationVolume(partial_grid_shape=(_N, _N, _N))
     objs.append(vol)
@@ -42,6 +50,9 @@ def _scene(*, devices=(("design", (4, 4, 4), (4, 4, 4)),), stock_detector=True, 
     )
     cons.append(mon.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(10, 6, 6)))
     objs.append(mon)
+    if source is not None:
+        cons.append(source.set_grid_coordinates(axes=(0, 1, 2), sides=("-",) * 3, coordinates=(1, 6, 6)))
+        objs.append(source)
     if stock_detector:
         # PhasorDetector's stock defaults: six components, continuous, exact
         # interpolation, complex64 -- every one of them wrong for the kernel.
@@ -121,6 +132,13 @@ class TestInternalScene:
         assert {d.name for d in io.detectors} == set(names)
         assert set(ia.detector_states) == set(names)
 
+    def test_late_windows_are_the_last_three_eighths(self):
+        """The solves run in four segments split there; no detector is added for the estimate."""
+        _, _, config = _scene(time=200e-15)
+        n = int(config.time_steps_total)
+        w = int(0.125 * n)
+        assert late_windows(config) == (n - 3 * w, n - 2 * w, n - w)
+
     def test_one_detector_per_device(self):
         objects, arrays, config = _scene(devices=(("a", (2, 2, 2), (3, 3, 3)), ("b", (7, 7, 7), (3, 3, 3))))
         io, _, names = _internal(objects, arrays, config)
@@ -166,23 +184,54 @@ class TestRefusals:
         with pytest.raises(NotImplementedError, match="dispersive"):
             reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
 
-    def test_aliasing_stride_is_refused(self):
-        """Measured: rel 4.5e-01 at 2.1 samples per period; strides with 4 or more are accepted."""
+    def test_a_stride_folding_the_source_spectrum_is_refused(self):
+        """Measured: a stride folding a source band onto the objective frequency gave cosine -0.63
+        (rel 1.0, no warning); the same illumination recorded every step, rel 1.6e-6."""
         from fdtdx.adjoint import reciprocity_phasor_fn
 
-        objects, arrays, config = _scene()
-        mon = next(d for d in objects.detectors if d.name == "mon")
+        def dipole(frequency):
+            wc = fdtdx.WaveCharacter(frequency=frequency)
+            return fdtdx.PointDipoleSource(
+                name="src",
+                partial_grid_shape=(1, 1, 1),
+                wave_character=wc,
+                temporal_profile=fdtdx.GaussianPulseProfile(
+                    center_wave=wc, spectral_width=fdtdx.WaveCharacter(frequency=0.1 * frequency)
+                ),
+                polarization=2,
+            )
 
-        def with_stride(stride):
+        def with_stride(objects, arrays, config, stride):
+            mon = next(d for d in objects.detectors if d.name == "mon")
             det = PhasorDetector(
-                name="mon", partial_grid_shape=(1, 1, 1), wave_characters=mon.wave_characters, dft_subsample=stride
+                name="mon",
+                partial_grid_shape=(1, 1, 1),
+                wave_characters=mon.wave_characters,
+                components=mon.components,
+                exact_interpolation=False,
+                dft_subsample=stride,
             ).place_on_grid(mon.grid_slice_tuple, config, _KEY)
-            return objects.aset("object_list", [det if o is mon else o for o in objects.object_list])
+            objects = objects.aset("object_list", [det if o is mon else o for o in objects.object_list])
+            return objects, arrays.aset("detector_states", {**arrays.detector_states, "mon": det.init_state()})
 
-        # 600 nm at 50 nm: 21 samples per period at stride 1, so 3.5 at stride 6 and 4.2 at stride 5
-        with pytest.raises(NotImplementedError, match="samples per period"):
-            reciprocity_phasor_fn(arrays, with_stride(6), config, _KEY, objective_detectors="mon")
-        reciprocity_phasor_fn(arrays, with_stride(5), config, _KEY, objective_detectors="mon")
+        f0 = 299792458.0 / _WL[0]
+        # a run the pulse fits in: a cut-off pulse is itself broadband
+        objects, arrays, config = _scene(source=dipole(f0), time=200e-15)
+        stride = 5
+        # a source band at 1 / (stride dt) - f0 folds onto f0
+        alias = 1.0 / (stride * float(config.time_step_duration)) - f0
+        objects_alias, arrays_alias, _ = _scene(source=dipole(alias), time=200e-15)
+        # refused where the figure of merit reads the row (an exactness check: also with tail_tolerance=None)
+        objects_alias, arrays_alias = with_stride(objects_alias, arrays_alias, config, stride)
+        fn = reciprocity_phasor_fn(
+            arrays_alias, objects_alias, config, _KEY, objective_detectors="mon", tail_tolerance=None
+        )
+        with pytest.raises(Exception, match="dft_subsample"):
+            jax.block_until_ready(jax.grad(lambda x: -jnp.sum(jnp.abs(fn(x)) ** 2))(arrays_alias.inv_permittivities))
+        # a source band clear of every image is fine at the same stride
+        objects, arrays = with_stride(objects, arrays, config, stride)
+        fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", tail_tolerance=None)
+        jax.block_until_ready(jax.grad(lambda x: -jnp.sum(jnp.abs(fn(x)) ** 2))(arrays.inv_permittivities))
 
     def test_bloch_boundary_with_a_wave_vector_is_refused(self):
         """Measured before the guard: rel 1.24 at cosine 0.35, forward value exact."""

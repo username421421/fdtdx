@@ -45,22 +45,26 @@ in float64. A lossy Device under a stock box far field (64x64x72, three
 wavelengths, GPU): rel 2.1e-08 (float64) and 2.0e-06 (float32) at 2.1-2.2x a
 forward run, 9-18x faster than checkpointed with 3-7x less memory
 (`notes/adjoint/05-guards.md`). `reciprocity_phasor_fn` is the same one
-level down, on `inv_permittivities`. `param_fn.diagnostics` and a
-`ConvergenceWarning` report DFTs that have not converged; a `PmlWarning`
-reports an objective whose adjoint current reaches the lossy part of a PML.
+level down, on `inv_permittivities`. It fails fast: every gradient carries an
+estimate of its DFT truncation error and raises, on every call, above
+`tail_tolerance` (default 1e-2; `param_fn.diagnostics` holds the estimates), and
+every configuration it cannot compute exactly raises at setup. It never falls
+back to another method.
 
 An existing `apply_params -> run_fdtd -> FoM -> jax.grad` script changes one
 string: `GradientConfig(method="checkpointed")` -> `GradientConfig(method="reciprocity")`
 (`src/fdtdx/adjoint/dropin.py`). The forward stays `run_fdtd`'s bit for bit, the
 phasor detectors the FoM reads get the adjoint currents, the gradient is exact
-for Device parameters (zero outside the Devices), and a FoM on the fields or a
+for Device parameters (a differentiated material array apply_params did not write
+raises), and a FoM on the fields or a
 time-domain detector raises. It matches `reciprocity_param_fn` to the bit on the
 test bed, the splitter and the colour splitter, at the same cost.
 
 **Supported:** any differentiable figure of merit over `PhasorDetector`
 phasors: E, H or both, components in any declared order, either
 `scaling_mode`, `exact_interpolation` on or off, `dft_subsample`; several
-monitors in one adjoint solve; `ModeOverlapDetector`, box-mode
+monitors in one adjoint solve, also at different frequencies (the solve runs at
+their union); `ModeOverlapDetector`, box-mode
 `FieldProjectionAngleDetector` (near-to-far), Poynting flux and closed-box net
 power. `Device` parameters with `param_transforms`, several Devices, and a
 design region that defaults to every Device or is named (a Device, any
@@ -76,9 +80,9 @@ silently wrong; the numbers are in `notes/adjoint/05-guards.md`.
 
 * Objective detectors that are not phasor detectors, or that have an
   apodization, a switch skipping time steps, `reduce_volume=True`,
-  `inverse=True`, a `dft_subsample` stride below 4 samples per period, or (box
-  projections) fewer than six components. Objective monitors with different
-  frequencies.
+  `inverse=True`, cells in a PML beyond its zero-loss first cell, a `dft_subsample`
+  stride that folds source spectrum onto an objective frequency, or (box
+  projections) fewer than six components.
 * Grids whose cell width varies along an axis (a stretched `RectilinearGrid`),
   nonzero Bloch vectors, full 3x3 material tensors.
 * A design region overlapping a PML, or containing a stock source (an
@@ -98,9 +102,11 @@ materials, i.e. electric conductivity, are supported since `ebdfc00`.)
 gradient through a lossy Device, or one etching loss, raises there; a lossless
 Device in a lossy scene is unaffected (`notes/adjoint/05-guards.md`).
 
-**Keep the source below about 0.1 x f0 in bandwidth.** At 0.4 x f0 the pulse is
-about 2.5 optical cycles and the error is 2.4e-03 instead of 2.5e-07. This is
-not fixed by running longer.
+**Sources must end, and should be DC-free.** A source still injecting at the end
+of the run is refused. A few-cycle pulse carries DC whose static remainder never
+decays where its current ends inside the domain (0.8% at 0.4 x f0, 8e-8 with the
+DC-free carrier); the convergence estimate raises on it. Make the carrier DC-free
+(`docs/source/reciprocity.rst`) or keep the bandwidth near 0.1 x f0.
 
 Files:
 
@@ -113,7 +119,7 @@ Files:
 * `src/fdtdx/adjoint/design.py` — design regions, the internal design detector,
   `internal_scene`, `apply_objects_once`, `device_dispersion_as_applied`
 * `src/fdtdx/adjoint/kernel.py` — window, amplitude solve, gradient kernel,
-  `dft_tail`, `ConvergenceWarning`, `PmlWarning`
+  `dft_tail`, `gradient_error_estimate`, `refuse_unconverged`
 * `src/fdtdx/adjoint/validation.py` — every refusal
 * `src/fdtdx/objects/sources/adjoint.py` — `AdjointCurrentSource`
 * `tests/unit/adjoint/` (all in CI) and `tests/simulation/adjoint/` (parity
@@ -163,6 +169,10 @@ Scope decisions already made, do not re-litigate without asking:
    untouched. `reversible` is unchanged except where `ebdfc00` made a Device's
    conductivity depend on its parameters, which it cannot differentiate: that
    gradient raises instead of an `UnexpectedTracerError`.
+4. **Fail fast** (asked for on 2026-09-24): where reciprocity cannot return
+   checkpointed's gradient it raises, naming the reason and `method="checkpointed"`.
+   No warning-only path where the gradient can be wrong, and never a silent
+   fallback to another method. Scope stays parity with native FDTDX.
 
 ## Notes
 
@@ -208,12 +218,22 @@ that the error *falls* with decay time, which is what
 `test_gradient_converges_with_runtime` checks. A fixed number passes or fails
 for reasons unrelated to correctness.
 
+**Checkpointed is exact for the run, not for the converged answer.** Where a
+mode rings off the objective frequency, checkpointed's gradient of the truncated
+DFT converges far more slowly than the figure of merit (its truncation carries a
+factor `(w_r - w) T`), and in a periodic slab with a guided mode that does not
+radiate it never converges. There reciprocity and checkpointed disagree by tens
+of percent with reciprocity the converged one (Fabry-Perot off resonance at
+3000 fs: reciprocity 2.5e-4 from the converged gradient, checkpointed 0.19;
+`notes/adjoint/05-guards.md`, "Which gradient converges"). Use rung 1 only on
+scenes whose fields decay; otherwise compare each method against a longer run.
+
 **Settled:** FDTDX's CPML preserves discrete reciprocity for sources and
 monitors outside it, to 1.2e-15 with a slab present, and periodic boundaries
 give bit-identical results. Inside the lossy part of the layer the pairing does
 not hold: a design region overlapping a PML is refused, and an objective there
-raises a `PmlWarning` weighted by the local CPML strength (the first PML cell,
-graded to zero loss, is harmless; notes/adjoint/05-guards.md).
+is refused wherever the local CPML strength is not zero (the first PML cell, graded to zero
+loss, is exact; one cell deeper was 5e-4 wrong; notes/adjoint/05-guards.md).
 
 ## Test problems come from the test bed, not from imagination
 
@@ -281,6 +301,13 @@ FDFD with mode-overlap objectives, and `Metagrating3D` and
 - **Scenes must decay** to about 1e-8 of peak field before the gradient is
   trusted at 1e-5. Reciprocity equals AD only up to DFT truncation, and the
   error is the product of two truncated transforms.
+- **Rerun `tests/unit/adjoint` after any JAX upgrade.** `adjoint/dropin.py` tells
+  `jax.jvp`, `jax.grad` and `jax.jit` apart through JAX internals that have no
+  public API: tracer class names (`JVPTracer`, `DynamicJaxprTracer`), the private
+  `_trace` attribute and the `jax_use_direct_linearize` flag. The `apply_params`
+  probe also relies on when JAX traces and memoizes a `custom_jvp` rule. A rename
+  gives a loud error (JAX's own message, or a false refusal), not a wrong
+  gradient; the guard tests name the check that changed.
 
 ## A separate bug, in the other repo
 

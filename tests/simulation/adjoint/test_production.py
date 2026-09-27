@@ -6,8 +6,6 @@ pipeline, and the two material/geometry cases that were previously believed to
 be unsupported.
 """
 
-import warnings
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -989,6 +987,125 @@ class TestDetectorDefaults:
         assert rel < 1e-5, f"continuous internal design detector: rel_L2 = {rel:.3e}"
 
 
+class TestMonitorsAtDifferentFrequencies:
+    """Objective monitors recording different frequencies: one adjoint solve over the union, each
+    monitor's cotangent at its own rows. ``lead`` (stock settings, same cell as ``mon``) at 650 nm, or
+    at 650 and 600 nm, the second shared with ``mon`` and listed in the other order."""
+
+    @staticmethod
+    def _fom(mon, lead):
+        return _FOM(mon) - 3.0 * jnp.sum(jnp.abs(lead) ** 2)
+
+    @pytest.mark.parametrize("lead", [(650e-9,), (650e-9, 600e-9)])
+    def test_phasor_level_matches_official(self, lead):
+        objects, arrays, _, config, _ = _scene(lead_wavelengths=lead)
+        v_off, g_off = _official_inv_eps_grad(
+            objects, arrays, config, lambda s: self._fom(s["mon"]["phasor"], s["lead"]["phasor"])
+        )
+        fn = reciprocity_phasor_fn(
+            arrays, objects, config, _KEY, objective_detectors=("mon", "lead"), design_detector="block"
+        )
+        v_rec, g_rec = jax.value_and_grad(lambda x: self._fom(*fn(x)))(arrays.inv_permittivities)
+        assert jnp.allclose(v_rec, v_off, rtol=1e-12)
+        gs = objects["block"].grid_slice
+        rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
+        assert rel < 1e-5, f"monitors at {lead} and {_WL}: rel_L2 = {rel:.3e}"
+
+    def test_run_fdtd_matches_checkpointed(self):
+        objects, arrays, params, config, _ = _scene(with_device=True, lead_wavelengths=(650e-9, 600e-9))
+
+        def fom(objs, states):
+            return self._fom(states["mon"]["phasor"], states["lead"]["phasor"])
+
+        (v_ck, g_ck), (v_rc, g_rc) = [
+            jax.value_and_grad(lambda p, m=m: _user_loss(arrays, objects, config, m, fom)(p)[0])(params)
+            for m in ("checkpointed", "reciprocity")
+        ]
+        assert v_rc == v_ck, "the forward value must be run_fdtd's"
+        rel, cos, scale = _parity_metrics(g_ck, g_rc)
+        assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+
+class TestObjectiveCheckWeights:
+    """The objective check weighs each read channel and frequency by its share of the figure of merit."""
+
+    def test_a_weakly_read_channel_does_not_refuse(self):
+        """A read monitor at 1200 nm carrying 1e-17 of the figure of merit, unconverged: an unweighted maximum
+        refused a figure of merit converged to 1e-7 (review 2026-09-25). Compared with checkpointed at 100 fs:
+        at 40 fs checkpointed itself is 8e-4 off."""
+        objects, arrays, _, config, _ = _scene(sim_fs=40.0, lead_wavelengths=(1200e-9,))
+
+        def fom(s):
+            return _FOM(s["mon"]["phasor"]) + _FOM(s["lead"]["phasor"])
+
+        long = _scene(sim_fs=100.0, lead_wavelengths=(1200e-9,))
+        _, g_off = _official_inv_eps_grad(long[0], long[1], long[3], fom)
+        fn = reciprocity_phasor_fn(
+            arrays, objects, config, _KEY, objective_detectors=("mon", "lead"), design_detector="block"
+        )
+
+        # one call: the check weighs the channels of one gradient (a call reading the weak monitor alone
+        # is that monitor's gradient, 188% unconverged, and refused)
+        def loss(x):
+            mon, lead = fn(x)
+            return fom({"mon": {"phasor": mon}, "lead": {"phasor": lead}})
+
+        g_rec = jax.grad(loss)(arrays.inv_permittivities)
+        gs = objects["block"].grid_slice
+        rel, _ = _rel_cos(g_rec[:, *gs], g_off[:, *gs])
+        assert rel < 1e-4, f"rel_L2 = {rel:.3e}"
+
+    def test_a_penalty_near_its_target_is_refused(self):
+        """A read row carrying 2% of the figure of merit's first-order change, 2% unconverged (a penalty term
+        near its target): averaged by share it passed with the gradient 11% off (review 2026-09-26)."""
+        objects, arrays, _, config, _ = _scene(sim_fs=40.0, wavelengths=(600e-9, 800e-9, 900e-9))
+        fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block")
+        target = 1.001 * float(jnp.sum(jnp.abs(fn(arrays.inv_permittivities)[0, 2]) ** 2))
+
+        def loss(x):
+            p = fn(x)
+            return -jnp.sum(jnp.abs(p[0, 0]) ** 2) + (jnp.sum(jnp.abs(p[0, 2]) ** 2) / target - 1.0) ** 2
+
+        with pytest.raises(Exception, match="objective monitors"):
+            jax.block_until_ready(jax.grad(loss)(arrays.inv_permittivities))
+
+    def test_an_unread_frequency_counts_nothing(self):
+        """A monitor frequency the figure of merit does not read: its adjoint field is the solve's noise, never
+        exactly 0, whose tail refused converged gradients (inf at 540 nm, true error 3e-6; review 2026-09-26).
+        Now the estimate is the one-frequency monitor's."""
+        estimates = []
+        for wavelengths in ((600e-9,), (600e-9, 540e-9)):
+            objects, arrays, _, config, _ = _scene(wavelengths=wavelengths)
+            fn = reciprocity_phasor_fn(
+                arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block"
+            )
+            jax.grad(lambda x: -jnp.sum(jnp.abs(fn(x)[0, 0]) ** 2))(arrays.inv_permittivities)
+            estimates.append(fn.diagnostics["gradient_error_estimate"])
+        # the two solves differ a little (one adjoint current at two frequencies): 1.4%, both about 5e-9
+        np.testing.assert_allclose(estimates[1], estimates[0], rtol=0.1)
+
+    def test_a_weak_row_folded_by_a_stride_is_refused(self):
+        """A strided row at 1.5e-5 of the source peak, folded at 6e-2 of its own content, passed the check
+        against the strongest row (8.96e-7 < 1e-6) and its gradient was 11% off (review 2026-09-25)."""
+        weak = float(c0 / 7.35235e14)
+        objects, arrays, _, config, _ = _scene(
+            wavelengths=(600e-9, weak),
+            monitor_kwargs=dict(
+                components=("Ez",),
+                scaling_mode="pulse",
+                dft_subsample=7,
+                exact_interpolation=False,
+                reduce_volume=False,
+                dtype=jnp.complex128,
+            ),
+        )
+        fn = reciprocity_phasor_fn(arrays, objects, config, _KEY, objective_detectors="mon", design_detector="block")
+        with pytest.raises(Exception, match="dft_subsample"):
+            jax.block_until_ready(jax.grad(lambda x: -jnp.sum(jnp.abs(fn(x)[0, 1]) ** 2))(arrays.inv_permittivities))
+        # the figure of merit reading the clean row only is not refused (an unread aliased row was, exact to 1.9e-9)
+        jax.block_until_ready(jax.grad(lambda x: -jnp.sum(jnp.abs(fn(x)[0, 0]) ** 2))(arrays.inv_permittivities))
+
+
 class TestLossyDevice:
     """A lossy Device material: ``apply_params`` writes its conductivity with the permittivity's
     weights, and the gradient carries that design dependence through the conductivity kernel,
@@ -1370,50 +1487,35 @@ def _periodic_mode_scene(sim_fs):
     return objects, arrays, _varied(params), config
 
 
-class TestPmlShare:
-    """The PML-weighted share of the adjoint current, against the real error (GPU, float64, 150 fs).
+class TestObjectiveInThePml:
+    """An objective whose adjoint current reaches the lossy part of a PML is refused (GPU, float64, 150 fs).
 
-    Box faces at cells 6 and 17 of 24. PML 6: the stencil enters the PML's zero-loss first cell,
-    share 0, rel 5.6e-07. PML 7: share 6.0e-03, rel 5.4e-04. PML 8: share 2.9e-02, rel 1.0e-02.
-    A mode port whose evanescent tail sits in the PML (TestStockObjectives): share 0, and exact.
+    Box faces at cells 6 and 17 of 24. PML 6: the stencil enters the PML's zero-loss first cell
+    only, rel 5.6e-07. PML 7: one cell deeper, rel 5.4e-04, which the former warning let pass
+    silently (share 6.0e-03 under its tolerance). PML 8: rel 1.0e-02. A mode port whose
+    evanescent tail sits in the PML (TestStockObjectives) reads no lossy cell, and is exact.
     """
 
     theta = jnp.asarray([0.0, 0.3, 0.6, 2.6, 3.0])
     phi = jnp.asarray([0.0, 0.8, 1.6, 2.4, 3.1])
 
     def _run(self, pml):
-        from fdtdx.adjoint import PmlWarning
-
         objects, arrays, params, config = _box_far_field_scene(pml=pml)
 
         def power(det, state):
             return -jnp.sum(det.project_all(state, self.theta, self.phi)["power"])
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            same, rel, _, _ = _param_parity(objects, arrays, params, config, power, power, "ff")
-            jax.effects_barrier()
-        return same, rel, [w for w in caught if issubclass(w.category, PmlWarning)]
+        return _param_parity(objects, arrays, params, config, power, power, "ff")
 
-    @pytest.mark.integration
-    def test_currents_deep_in_the_pml_warn_and_are_really_off(self):
-        same, rel, pml_warnings = self._run(pml=8)
-        assert same
-        assert pml_warnings, "no PmlWarning for faces two cells deep in the PML"
-        assert rel > 1e-3, f"the gradient was expected to be off, rel {rel:.3e}"
+    @pytest.mark.parametrize("pml", [7, 8], ids=["one-cell-deeper", "two-cells-deeper"])
+    def test_currents_in_the_lossy_pml_are_refused(self, pml):
+        with pytest.raises(NotImplementedError, match="inside a PML"):
+            self._run(pml=pml)
 
     def test_the_first_pml_cell_is_harmless(self):
-        same, rel, pml_warnings = self._run(pml=6)
+        same, rel, _, _ = self._run(pml=6)
         assert same
-        assert not pml_warnings, [str(w.message) for w in pml_warnings]
         assert rel < 1e-5, f"rel {rel:.3e}"
-
-    @pytest.mark.integration
-    def test_a_share_under_the_tolerance_is_quiet(self):
-        same, rel, pml_warnings = self._run(pml=7)
-        assert same
-        assert not pml_warnings, [str(w.message) for w in pml_warnings]
-        assert rel < 1e-3, f"rel {rel:.3e}"
 
 
 def _box_far_field_scene(sim_fs=150.0, pml=_PML, device_material=None):
@@ -1684,45 +1786,48 @@ class TestGeometry:
 
 
 class TestConvergenceDiagnostic:
-    """The DFT tail estimate warns when the phasors have not converged.
+    """The gradient is refused, on every call, when its estimated truncation error exceeds tail_tolerance.
 
-    On the colour splitter (real cell at 100 nm, float64) the adjoint design tail
-    tracked the gradient error where it is garbage: 1.46 at 22 fs (rel 20),
-    1.19 at 30 fs (rel 2.3), 0.77 at 35 fs (rel 0.78), 6.8e-02 at 50 fs (rel 0.15).
+    The estimate (``kernel.gradient_error_estimate``) weighs each frequency's gradient term by the
+    truncation of the forward and adjoint design phasors and the objective phasors, each from the
+    field left at the end and the two late windows continued geometrically. Measured in this scene
+    (CPU, float64): 40 fs true rel 4.6e-07, estimate 1.1e-07; 70 fs 5.1e-09 and 1.4e-09. The former
+    end-field estimate alone missed a high-index Device's ringing: rel 0.41 at a tail of 8.6e-03.
     """
 
-    def _value_and_grad(self, sim_fs):
-        from fdtdx.adjoint import ConvergenceWarning
+    _RINGING = fdtdx.Material(permittivity=12.0)
 
-        objects, arrays, params, config, _ = _scene(sim_fs, with_device=True)
-        param_fn = reciprocity_param_fn(arrays, objects, config, _KEY, objective_detectors="mon")
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _, g_rec = jax.value_and_grad(lambda p: _FOM(param_fn(p)))(params)
-            jax.effects_barrier()
-        convergence = [w for w in caught if issubclass(w.category, ConvergenceWarning)]
-        return (objects, arrays, params, config), g_rec, param_fn.diagnostics, convergence
+    def _param_fn(self, sim_fs, tail_tolerance=1e-2, device_material=None):
+        objects, arrays, params, config, _ = _scene(sim_fs, with_device=True, device_material=device_material)
+        param_fn = reciprocity_param_fn(
+            arrays, objects, config, _KEY, objective_detectors="mon", tail_tolerance=tail_tolerance
+        )
+        return (objects, arrays, params, config), param_fn
 
-    def test_converged_scene_is_quiet(self):
-        _, _, diag, convergence = self._value_and_grad(150.0)
-        assert not convergence, [str(w.message) for w in convergence]
-        tails = [
-            v for key in ("objective_tail", "forward_design_tail", "adjoint_design_tail") for v in diag[key].values()
-        ]
-        assert len(tails) == 3 and max(tails) < 1e-4, diag
+    def test_converged_scene_is_accepted(self):
+        scene, param_fn = self._param_fn(150.0)
+        jax.block_until_ready(jax.value_and_grad(lambda p: _FOM(param_fn(p)))(scene[2]))
+        jax.effects_barrier()
+        assert param_fn.diagnostics["gradient_error_estimate"] < 1e-6, param_fn.diagnostics
+
+    def test_a_pulse_the_run_does_not_outlast_is_refused_at_setup(self):
+        # 0.1 f0 at 600 nm peaks at 19 fs and lasts to about 35 fs
+        with pytest.raises(NotImplementedError, match="still injects"):
+            self._param_fn(25.0)
 
     @pytest.mark.integration
-    def test_truncated_run_warns_and_is_really_wrong(self):
-        # Measured in this scene (CPU, float64): 25 fs warns (objective tail 5.9e-02) and the
-        # gradient is off by rel 2.2e-01; at 30 fs the tails are <= 3.0e-03, the gradient is
-        # within 6.2e-03 and the warning is correctly silent.
-        scene, g_rec, diag, convergence = self._value_and_grad(25.0)
-        assert all(diag[k] for k in ("objective_tail", "forward_design_tail", "adjoint_design_tail")), diag
-        assert convergence, f"no ConvergenceWarning, diagnostics {diag}"
-        assert "have not converged" in str(convergence[0].message)
+    def test_ringing_is_refused_and_really_wrong(self):
+        scene, param_fn = self._param_fn(60.0, device_material=self._RINGING)
+        with pytest.raises(Exception, match="have not converged"):
+            jax.block_until_ready(jax.value_and_grad(lambda p: _FOM(param_fn(p)))(scene[2]))
+        _, unchecked = self._param_fn(60.0, tail_tolerance=None, device_material=self._RINGING)
+        _, g_rec = jax.value_and_grad(lambda p: _FOM(unchecked(p)))(scene[2])
+        jax.effects_barrier()
         _, g_off = _official_param_grad(*scene)
         rel, cos, _ = _parity_metrics(g_off, g_rec)
-        assert rel > 1e-2, f"the 25 fs gradient was expected to be off, rel {rel:.3e} cos {cos:.6f}"
+        estimate = unchecked.diagnostics["gradient_error_estimate"]
+        assert rel > 1e-2, f"the 60 fs gradient was expected to be off, rel {rel:.3e} cos {cos:.6f}"
+        assert estimate > 1e-2, f"estimate {estimate:.3e} against a true error of {rel:.3e}"
 
 
 class TestDispersiveBlockUnderDevice:
@@ -1827,6 +1932,27 @@ class TestRunFdtdReciprocity:
         assert v_rc == v_ck, "the forward value must be run_fdtd's"
         rel, cos, scale = _parity_metrics(g_ck, g_rc)
         assert rel < 1e-5 and abs(scale - 1) < 1e-5, f"rel {rel:.3e} cos {cos:.10f} scale {scale:.9f}"
+
+    def test_progress_is_one_run(self):
+        """``progress_callback`` sees one run from 0 to the end, as with checkpointed; the solve runs in
+        segments, and each reported its own 0 to its own length (review 2026-09-25)."""
+        objects, arrays, params, config, _ = _scene(with_device=True, sim_fs=60.0)
+        config = config.aset("gradient_config", GradientConfig(method="reciprocity"))
+        seen = []
+
+        def loss(p):
+            arrs, objs, _ = apply_params(arrays, objects, p, _KEY)
+            _, out = fdtdx.run_fdtd(
+                arrs, objs, config, _KEY, show_progress=False, progress_callback=lambda s, n: seen.append((s, n))
+            )
+            return _FOM(out.detector_states["mon"]["phasor"])
+
+        jax.grad(loss)(params)
+        jax.effects_barrier()
+        n = int(config.time_steps_total)
+        steps = [s for s, _ in seen]
+        assert {total for _, total in seen} == {n}
+        assert steps == sorted(steps) and steps[-1] == n and steps.count(n) == 1
 
     def test_unread_monitors_get_no_adjoint_current_and_jit_sets_up_once(self, monkeypatch):
         """``lead``, ``mon2`` and ``des`` are recorded but not read: their cotangents are symbolic zeros,
